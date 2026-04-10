@@ -45,13 +45,17 @@ export function createSessionRoutes(services) {
   }));
 
   // POST /api/sessions/:id/events — Ingest capture events (batch)
+  // Supports auto-create mode for server probes (X-Sentinel-Source header)
   router.post('/:id/events', asyncHandler(async (req, res) => {
     const { events } = req.body;
     if (!Array.isArray(events) || events.length === 0) {
       throw new ValidationError('events must be a non-empty array');
     }
 
-    const result = await services.sessions.ingestEvents(req.params.id, events);
+    const source = req.get('X-Sentinel-Source');
+    const autoCreate = !!source; // server probes set this header
+
+    const result = await services.sessions.ingestEvents(req.params.id, events, { autoCreate, source });
     res.status(201).json({ success: true, data: { count: result.ingested } });
   }));
 

@@ -32,10 +32,14 @@
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.30.0",
-    "openai": ">=4.0.0"
+    "openai": ">=4.0.0",
+    "rrweb": ">=2.0.0-alpha.0",
+    "html2canvas": ">=1.4.0"
   },
   "peerDependenciesMeta": {
     "@anthropic-ai/sdk": { "optional": true },
-    "openai": { "optional": true }
+    "openai": { "optional": true },
+    "rrweb": { "optional": true },
+    "html2canvas": { "optional": true }
   }
 }

@@ -110,6 +110,9 @@ export class DebugProbeTraceAdapter extends TracePort {
       req._sentinelCorrelation = correlationId;
       req._sentinelTraceEntry = entry;
 
+      // Set active entry so wrapPool() can correlate SQL queries to this request
+      this.setActiveEntry(entry);
+
       // Capture response on finish
       const originalEnd = res.end;
       res.end = (...args) => {
@@ -119,6 +122,9 @@ export class DebugProbeTraceAdapter extends TracePort {
           headers: this._sanitizeHeaders(res.getHeaders()),
           durationMs: Number(durationNs) / 1e6,
         };
+
+        // Clear active entry to avoid cross-request leakage
+        this._activeEntry = null;
 
         this._store(entry);
         return originalEnd.apply(res, args);

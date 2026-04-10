@@ -31,6 +31,28 @@ export class SessionService {
     return session;
   }
 
+  /**
+   * Get session or auto-create it (for server-to-server probe compatibility).
+   * When a probe like DebugProbe sends events with its own session ID,
+   * we auto-create the session on first event ingestion.
+   */
+  async getOrCreate(sessionId, { projectId, source } = {}) {
+    const existing = await this.storage.getSession(sessionId);
+    if (existing) return existing;
+
+    const session = new Session({
+      projectId: projectId || 'auto',
+      userId: source || 'probe',
+      userAgent: `server-probe/${source || 'unknown'}`,
+      pageUrl: null,
+      metadata: { autoCreated: true, source: source || 'probe' },
+    });
+    // Override auto-generated ID with the probe's session ID
+    session.id = sessionId;
+    await this.storage.createSession(session);
+    return session;
+  }
+
   async complete(sessionId) {
     const session = await this.get(sessionId);
     session.complete();
@@ -38,7 +60,7 @@ export class SessionService {
     return session;
   }
 
-  async ingestEvents(sessionId, rawEvents) {
+  async ingestEvents(sessionId, rawEvents, { autoCreate = false, source } = {}) {
     if (!Array.isArray(rawEvents) || rawEvents.length === 0) {
       throw new ValidationError('events must be a non-empty array');
     }
@@ -46,7 +68,11 @@ export class SessionService {
       throw new ValidationError('Maximum 500 events per batch');
     }
 
-    const session = await this.get(sessionId);
+    // Auto-create mode: server probes send events without pre-creating sessions
+    const session = autoCreate
+      ? await this.getOrCreate(sessionId, { source })
+      : await this.get(sessionId);
+
     if (!session.isActive()) {
       throw new ValidationError(`Session ${sessionId} is ${session.status}, cannot ingest events`);
     }
