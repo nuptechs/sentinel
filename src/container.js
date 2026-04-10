@@ -121,9 +121,29 @@ async function buildStorage() {
       connectionString: url,
       max: parseInt(process.env.SENTINEL_DB_POOL_MAX || '10', 10),
       idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 5_000,
     });
-    console.log('[Sentinel] Storage: PostgreSQL');
-    return new PostgresStorageAdapter({ pool });
+
+    // Retry connection up to 5 times (Postgres may still be starting)
+    const maxRetries = parseInt(process.env.SENTINEL_DB_RETRIES || '5', 10);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const client = await pool.connect();
+        client.release();
+        console.log('[Sentinel] Storage: PostgreSQL (connected)');
+        return new PostgresStorageAdapter({ pool });
+      } catch (err) {
+        console.warn(`[Sentinel] Postgres connection attempt ${attempt}/${maxRetries} failed: ${err.message}`);
+        if (attempt < maxRetries) {
+          await new Promise((r) => setTimeout(r, attempt * 2000));
+        }
+      }
+    }
+
+    // All retries failed — fall back to in-memory
+    console.error('[Sentinel] Postgres unavailable after retries — falling back to in-memory');
+    await pool.end().catch(() => {});
+    return new MemoryStorageAdapter();
   }
 
   console.log('[Sentinel] Storage: in-memory (no DATABASE_URL)');
