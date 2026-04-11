@@ -248,6 +248,34 @@ describe('HTTP API', () => {
       assert.equal(res.body.data.title, 'The save button does nothing');
     });
 
+    it('auto-diagnoses and auto-generates a correction when enabled', async () => {
+      process.env.SENTINEL_AUTO_DIAGNOSE = 'true';
+      process.env.SENTINEL_AUTO_CORRECT = 'true';
+
+      try {
+        const created = await makeRequest(server, 'POST', '/api/findings', {
+          sessionId: 'sess-auto',
+          projectId: 'proj-auto',
+          title: 'Auto process me',
+          type: 'bug',
+          source: 'manual',
+        });
+
+        assert.equal(created.status, 201);
+
+        await new Promise(resolve => setTimeout(resolve, 25));
+
+        const found = await makeRequest(server, 'GET', `/api/findings/${created.body.data.id}`);
+        assert.equal(found.status, 200);
+        assert.equal(found.body.data.status, 'fix_proposed');
+        assert.ok(found.body.data.diagnosis);
+        assert.ok(found.body.data.correction);
+      } finally {
+        delete process.env.SENTINEL_AUTO_DIAGNOSE;
+        delete process.env.SENTINEL_AUTO_CORRECT;
+      }
+    });
+
     it('returns 400 without sessionId', async () => {
       const res = await makeRequest(server, 'POST', '/api/findings', { projectId: 'p' });
       assert.equal(res.status, 400);

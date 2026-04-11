@@ -4,6 +4,9 @@
 // Endpoint → Controller → Service → Repository → Entity
 // ─────────────────────────────────────────────
 
+import { readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { AnalyzerPort } from '../../core/ports/analyzer.port.js';
 import { IntegrationError } from '../../core/errors.js';
 
@@ -13,12 +16,22 @@ export class ManifestAnalyzerAdapter extends AnalyzerPort {
    * @param {string} options.baseUrl   — e.g. "https://probeserver-production.up.railway.app"
    * @param {string} [options.apiKey]
    * @param {number} [options.timeoutMs]
+   * @param {string} [options.projectRoot]
+   * @param {Record<string, string>} [options.projectRoots]
    */
-  constructor({ baseUrl, apiKey, timeoutMs = 10_000 }) {
+  constructor({
+    baseUrl,
+    apiKey,
+    timeoutMs = 10_000,
+    projectRoot = process.env.SENTINEL_PROJECT_ROOT || process.env.PROJECT_ROOT || null,
+    projectRoots = null,
+  } = {}) {
     super();
-    this.baseUrl = baseUrl.replace(/\/$/, '');
+    this.baseUrl = baseUrl ? baseUrl.replace(/\/$/, '') : '';
     this.apiKey = apiKey || null;
     this.timeoutMs = timeoutMs;
+    this.projectRoot = projectRoot || null;
+    this.projectRoots = projectRoots || this._parseProjectRoots(process.env.SENTINEL_PROJECT_ROOTS || '');
   }
 
   async resolveEndpoint(projectId, endpoint, method) {
@@ -45,9 +58,17 @@ export class ManifestAnalyzerAdapter extends AnalyzerPort {
   }
 
   async getSourceFile(projectId, filePath) {
-    // Manifest stores source files in analysis runs
-    // For now, return null — file reading requires direct project access
-    // This will be extended when Manifest adds source content API
+    const rootDir = this._resolveProjectRoot(projectId);
+    if (!rootDir || !filePath) return null;
+
+    for (const candidate of this._getCandidatePaths(rootDir, filePath)) {
+      try {
+        return await readFile(candidate, 'utf8');
+      } catch {
+        // Try the next candidate path
+      }
+    }
+
     return null;
   }
 
@@ -77,8 +98,8 @@ export class ManifestAnalyzerAdapter extends AnalyzerPort {
     return this._fetch(`/api/catalog-entries/${projectId}`);
   }
 
-  async _fetch(path, options = {}) {
-    const url = `${this.baseUrl}${path}`;
+  async _fetch(pathName, options = {}) {
+    const url = `${this.baseUrl}${pathName}`;
     const headers = { 'Accept': 'application/json' };
     if (this.apiKey) headers['X-API-Key'] = this.apiKey;
     if (options.method === 'POST') headers['Content-Type'] = 'application/json';
@@ -133,5 +154,75 @@ export class ManifestAnalyzerAdapter extends AnalyzerPort {
   _classToPath(className) {
     // Convert "easynup.services.web.contract.CreateContractWsV1" to file path
     return className.replace(/\./g, '/') + '.java';
+  }
+
+  _resolveProjectRoot(projectId) {
+    const projectKey = String(projectId || '');
+    const mappedRoot = this.projectRoots?.[projectKey]
+      || this.projectRoots?.default
+      || this.projectRoots?.['*'];
+
+    if (mappedRoot) return mappedRoot;
+    if (this.projectRoot) return this.projectRoot;
+
+    const siblingCandidates = [
+      path.resolve(process.cwd(), '..', projectKey),
+      path.resolve(process.cwd(), '..', 'easynup'),
+      path.resolve(process.cwd(), '..', 'EasyNuP'),
+    ];
+
+    return siblingCandidates.find((candidate) => existsSync(candidate)) || null;
+  }
+
+  _getCandidatePaths(rootDir, filePath) {
+    const normalized = String(filePath).replace(/\\/g, '/').replace(/^\/+/, '');
+    const withoutPackagePrefix = normalized.replace(/^easynup\//, '');
+
+    const candidates = [
+      normalized,
+      withoutPackagePrefix,
+      path.join('src/main/java', normalized),
+      path.join('src/main/java', withoutPackagePrefix),
+      path.join('src', normalized),
+      path.join('frontend', normalized),
+    ];
+
+    return [...new Set(
+      candidates
+        .map((candidate) => this._safeResolve(rootDir, candidate))
+        .filter(Boolean)
+    )];
+  }
+
+  _safeResolve(rootDir, candidate) {
+    const resolvedRoot = path.resolve(rootDir);
+    const resolvedPath = path.resolve(resolvedRoot, candidate);
+
+    if (resolvedPath === resolvedRoot || resolvedPath.startsWith(resolvedRoot + path.sep)) {
+      return resolvedPath;
+    }
+
+    return null;
+  }
+
+  _parseProjectRoots(raw) {
+    if (!raw) return {};
+
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // Fallback to key=value,key=value format
+    }
+
+    const entries = raw
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .map((item) => item.split('=').map((part) => part?.trim()));
+
+    return Object.fromEntries(entries.filter(([key, value]) => key && value));
   }
 }

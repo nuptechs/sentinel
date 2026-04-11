@@ -27,6 +27,64 @@ describe('DebugProbeTraceAdapter', () => {
     assert.equal(trace, null);
   });
 
+  it('fetches remote traces from the Debug Probe API when baseUrl is configured', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = async () => ({
+      ok: true,
+      async json() {
+        return {
+          events: [
+            {
+              id: 'evt-1',
+              sessionId: 'sess-remote',
+              source: 'sdk',
+              type: 'http-request',
+              timestamp: 1_000,
+              correlationId: 'corr-remote',
+              data: { method: 'GET', path: '/api/test', url: '/api/test' },
+            },
+            {
+              id: 'evt-2',
+              sessionId: 'sess-remote',
+              source: 'sdk',
+              type: 'db-query',
+              timestamp: 1_005,
+              correlationId: 'corr-remote',
+              data: { query: 'SELECT 1', durationMs: 4 },
+            },
+            {
+              id: 'evt-3',
+              sessionId: 'sess-remote',
+              source: 'sdk',
+              type: 'http-response',
+              timestamp: 1_010,
+              correlationId: 'corr-remote',
+              data: { statusCode: 200, durationMs: 10 },
+            },
+          ],
+          total: 3,
+        };
+      },
+    });
+
+    try {
+      const remoteAdapter = new DebugProbeTraceAdapter({
+        baseUrl: 'http://probe.local',
+        apiKey: 'test-key',
+        maxTraces: 100,
+      });
+
+      const traces = await remoteAdapter.getTraces('sess-remote');
+      assert.equal(traces.length, 1);
+      assert.equal(traces[0].correlationId, 'corr-remote');
+      assert.equal(traces[0].payload.method, 'GET');
+      assert.equal(traces[0].payload.statusCode, 200);
+      assert.equal(traces[0].payload.queryCount, 1);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
   describe('middleware', () => {
     function mockReq({ sessionId, correlationId, method = 'GET', path = '/test', body = null } = {}) {
       const headers = {};

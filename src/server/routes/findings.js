@@ -6,6 +6,20 @@ import { Router } from 'express';
 import { asyncHandler } from '../middleware/error-handler.js';
 import { ValidationError } from '../../core/errors.js';
 
+async function autoProcessFinding(services, findingId) {
+  if (process.env.SENTINEL_AUTO_DIAGNOSE !== 'true') return;
+
+  try {
+    await services.diagnosis.diagnose(findingId);
+
+    if (process.env.SENTINEL_AUTO_CORRECT === 'true') {
+      await services.correction.generateCorrection(findingId);
+    }
+  } catch (err) {
+    console.warn(`[Sentinel] Auto-processing failed for finding ${findingId}:`, err.message);
+  }
+}
+
 export function createFindingRoutes(services) {
   const router = Router();
 
@@ -33,6 +47,10 @@ export function createFindingRoutes(services) {
       type: type || 'bug',
       severity: severity || 'medium',
       source: source || 'manual',
+    });
+
+    queueMicrotask(() => {
+      void autoProcessFinding(services, finding.id);
     });
 
     res.status(201).json({ success: true, data: finding.toJSON() });

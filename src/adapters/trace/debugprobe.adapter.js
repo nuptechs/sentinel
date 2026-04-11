@@ -21,11 +21,23 @@ export class DebugProbeTraceAdapter extends TracePort {
    * @param {object} [options]
    * @param {number} [options.maxTraces=10000] — max traces to keep in memory
    * @param {number} [options.maxAgeSec=3600]  — evict traces older than this
+   * @param {string} [options.baseUrl]         — remote Debug Probe API base URL
+   * @param {string} [options.apiKey]          — optional bearer token for Debug Probe API
+   * @param {number} [options.timeoutMs=5000]  — timeout for remote API calls
    */
-  constructor({ maxTraces = 10_000, maxAgeSec = 3600 } = {}) {
+  constructor({
+    maxTraces = 10_000,
+    maxAgeSec = 3600,
+    baseUrl = process.env.SENTINEL_TRACE_URL || process.env.DEBUG_PROBE_URL || process.env.PROBE_SERVER_URL || null,
+    apiKey = process.env.SENTINEL_TRACE_API_KEY || process.env.PROBE_API_KEY || null,
+    timeoutMs = 5000,
+  } = {}) {
     super();
     this.maxTraces = maxTraces;
     this.maxAgeSec = maxAgeSec;
+    this.baseUrl = baseUrl ? baseUrl.replace(/\/$/, '') : null;
+    this.apiKey = apiKey || null;
+    this.timeoutMs = timeoutMs;
 
     // Store: Map<correlationId, TraceEntry>
     // TraceEntry = { correlationId, sessionId, request, response, queries[], createdAt }
@@ -38,6 +50,17 @@ export class DebugProbeTraceAdapter extends TracePort {
   // ── TracePort interface ───────────────────
 
   async getTraces(sessionId, { since, until, limit = 500 } = {}) {
+    const fromTime = this._toTimestamp(since);
+    const toTime = this._toTimestamp(until);
+
+    if (this.baseUrl) {
+      try {
+        return await this._fetchRemoteTraces(sessionId, { since: fromTime, until: toTime, limit });
+      } catch (err) {
+        console.warn(`[Sentinel] Debug Probe remote fetch failed for session ${sessionId}:`, err.message);
+      }
+    }
+
     const correlationIds = this.sessionIndex.get(sessionId);
     if (!correlationIds) return [];
 
@@ -45,8 +68,8 @@ export class DebugProbeTraceAdapter extends TracePort {
     for (const cid of correlationIds) {
       const trace = this.traces.get(cid);
       if (!trace) continue;
-      if (since && trace.createdAt < since) continue;
-      if (until && trace.createdAt > until) continue;
+      if (fromTime && trace.createdAt < fromTime) continue;
+      if (toTime && trace.createdAt > toTime) continue;
       results.push(this._formatTrace(trace));
     }
 
@@ -187,6 +210,111 @@ export class DebugProbeTraceAdapter extends TracePort {
 
   // ── Internal helpers ──────────────────────
 
+  async _fetchRemoteTraces(sessionId, { since, until, limit = 500 } = {}) {
+    const params = new URLSearchParams({
+      limit: String(Math.min(limit, 1000)),
+      offset: '0',
+    });
+
+    if (since) params.set('fromTime', String(since));
+    if (until) params.set('toTime', String(until));
+
+    const payload = await this._fetchJSON(
+      `/api/sessions/${encodeURIComponent(sessionId)}/events?${params.toString()}`
+    );
+
+    const events = Array.isArray(payload?.events) ? payload.events : [];
+    const grouped = new Map();
+
+    for (const event of events) {
+      const correlationId = event?.correlationId || event?.requestId || event?.id || uuid();
+      if (!grouped.has(correlationId)) {
+        grouped.set(correlationId, {
+          correlationId,
+          sessionId: event?.sessionId || sessionId,
+          request: null,
+          response: null,
+          queries: [],
+          createdAt: this._toTimestamp(event?.timestamp) || Date.now(),
+        });
+      }
+
+      const entry = grouped.get(correlationId);
+      entry.createdAt = Math.min(entry.createdAt, this._toTimestamp(event?.timestamp) || entry.createdAt);
+
+      const data = event?.data || event?.payload || {};
+      switch (event?.type) {
+        case 'http-request':
+          entry.request = {
+            method: data.method || null,
+            path: data.path || data.url || null,
+            url: data.url || null,
+            headers: this._sanitizeHeaders(data.headers),
+            query: data.query || null,
+            body: this._truncateBody(data.body),
+            ip: data.ip || null,
+          };
+          break;
+        case 'http-response':
+          entry.response = {
+            statusCode: data.statusCode || null,
+            headers: this._sanitizeHeaders(data.headers),
+            durationMs: data.durationMs || null,
+          };
+          break;
+        case 'db-query':
+          entry.queries.push({
+            sql: data.query || data.sql || null,
+            params: this._sanitizeParams(data.params),
+            durationMs: data.durationMs || null,
+            rowCount: data.rowCount ?? null,
+            error: data.error || null,
+          });
+          break;
+        default:
+          break;
+      }
+    }
+
+    return [...grouped.values()]
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((entry) => this._formatTrace(entry))
+      .slice(0, limit);
+  }
+
+  async _fetchJSON(path) {
+    const headers = { Accept: 'application/json' };
+    if (this.apiKey) {
+      headers.Authorization = `Bearer ${this.apiKey}`;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    try {
+      const response = await fetch(`${this.baseUrl}${path}`, {
+        headers,
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Debug Probe API error: ${response.status}`);
+      }
+
+      return await response.json();
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  _toTimestamp(value) {
+    if (value == null) return null;
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (value instanceof Date) return value.getTime();
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
   _store(entry) {
     this.traces.set(entry.correlationId, entry);
 
@@ -247,6 +375,7 @@ export class DebugProbeTraceAdapter extends TracePort {
         url: entry.request?.url,
         statusCode: entry.response?.statusCode,
         durationMs: entry.response?.durationMs,
+        queryCount: entry.queries?.length ?? 0,
         queries: entry.queries,
       },
     };

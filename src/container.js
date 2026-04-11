@@ -151,10 +151,17 @@ async function buildStorage() {
 }
 
 function buildTrace() {
-  if (process.env.SENTINEL_TRACE === 'debugprobe') {
+  const traceMode = process.env.SENTINEL_TRACE;
+  const traceBaseUrl = process.env.SENTINEL_TRACE_URL || process.env.DEBUG_PROBE_URL || process.env.PROBE_SERVER_URL || null;
+
+  if (traceMode === 'debugprobe' || traceBaseUrl) {
     const maxTraces = parseInt(process.env.SENTINEL_TRACE_MAX || '10000', 10);
-    console.log(`[Sentinel] Trace: DebugProbe (max=${maxTraces})`);
-    return new DebugProbeTraceAdapter({ maxTraces });
+    console.log(`[Sentinel] Trace: DebugProbe${traceBaseUrl ? ` → ${traceBaseUrl}` : ''} (max=${maxTraces})`);
+    return new DebugProbeTraceAdapter({
+      maxTraces,
+      baseUrl: traceBaseUrl,
+      apiKey: process.env.SENTINEL_TRACE_API_KEY || process.env.PROBE_API_KEY || null,
+    });
   }
   return new NoopTraceAdapter();
 }
