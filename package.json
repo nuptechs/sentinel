@@ -20,6 +20,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
     "compression": "^1.8.0",
     "cors": "^2.8.5",
     "express": "^5.1.0",
@@ -31,15 +32,11 @@
     "eslint": "^9.0.0"
   },
   "peerDependencies": {
-    "@anthropic-ai/sdk": ">=0.30.0",
     "html2canvas": ">=1.4.0",
     "openai": ">=4.0.0",
     "rrweb": ">=2.0.0-alpha.0"
   },
   "peerDependenciesMeta": {
-    "@anthropic-ai/sdk": {
-      "optional": true
-    },
     "openai": {
       "optional": true
     },
