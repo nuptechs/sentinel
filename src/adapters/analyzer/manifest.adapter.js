@@ -9,6 +9,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { AnalyzerPort } from '../../core/ports/analyzer.port.js';
 import { IntegrationError } from '../../core/errors.js';
+import { CircuitBreaker } from '../../core/infra/circuit-breaker.js';
 
 export class ManifestAnalyzerAdapter extends AnalyzerPort {
   /**
@@ -32,6 +33,22 @@ export class ManifestAnalyzerAdapter extends AnalyzerPort {
     this.timeoutMs = timeoutMs;
     this.projectRoot = projectRoot || null;
     this.projectRoots = projectRoots || this._parseProjectRoots(process.env.SENTINEL_PROJECT_ROOTS || '');
+
+    // Circuit breaker: protects against Manifest API outages.
+    // 4xx errors don't trip the breaker — those are our problem, not the API's.
+    this._breaker = new CircuitBreaker({
+      name: 'manifest-analyzer',
+      failureThreshold: 3,
+      windowMs: 60_000,
+      recoveryMs: 30_000,
+      timeoutMs: this.timeoutMs,
+      isFailure: (err) => {
+        if (err instanceof IntegrationError && err.context?.status >= 400 && err.context?.status < 500) {
+          return false;
+        }
+        return true;
+      },
+    });
   }
 
   async resolveEndpoint(projectId, endpoint, method) {
@@ -82,7 +99,7 @@ export class ManifestAnalyzerAdapter extends AnalyzerPort {
   }
 
   async analyze(projectId) {
-    const response = await this._fetch(`/api/projects/${projectId}/analyze`, {
+    const response = await this._protectedFetch(`/api/projects/${projectId}/analyze`, {
       method: 'POST',
     });
     return response;
@@ -95,7 +112,26 @@ export class ManifestAnalyzerAdapter extends AnalyzerPort {
   // ── Private ───────────────────────────────
 
   async _fetchCatalogEntries(projectId) {
-    return this._fetch(`/api/catalog-entries/${projectId}`);
+    return this._protectedFetch(`/api/catalog-entries/${projectId}`);
+  }
+
+  /**
+   * Route external HTTP calls through the circuit breaker.
+   * When the circuit is OPEN, calls fail fast with IntegrationError
+   * instead of waiting for timeouts against a dead service.
+   */
+  async _protectedFetch(pathName, options = {}) {
+    try {
+      return await this._breaker.fire(() => this._fetch(pathName, options));
+    } catch (err) {
+      if (err.isCircuitOpen) {
+        throw new IntegrationError(
+          'Manifest API circuit breaker is open — service unavailable',
+          { url: `${this.baseUrl}${pathName}`, circuitState: 'open' },
+        );
+      }
+      throw err;
+    }
   }
 
   async _fetch(pathName, options = {}) {
@@ -203,6 +239,10 @@ export class ManifestAnalyzerAdapter extends AnalyzerPort {
     }
 
     return null;
+  }
+
+  getCircuitStatus() {
+    return this._breaker.getStatus();
   }
 
   _parseProjectRoots(raw) {

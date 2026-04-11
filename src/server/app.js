@@ -19,8 +19,9 @@ import { MCPServer } from '../mcp/server.js';
 /**
  * Build the Express app with all middleware and routes.
  * Receives the service layer from the container.
+ * Optionally receives adapters for composite health checks.
  */
-export function createApp(services) {
+export function createApp(services, adapters = null) {
   const app = express();
 
   // ── Security & parsing ──────────────────────
@@ -35,8 +36,79 @@ export function createApp(services) {
   app.use(requestId);
 
   // ── Health (before auth — must be public) ───
+
+  // Liveness probe: am I running?
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: Date.now() });
+  });
+
+  // Readiness probe: can I serve traffic?
+  // Reports component-level status for observability.
+  app.get('/ready', async (_req, res) => {
+    const components = {};
+    let overall = 'healthy';
+
+    // Storage check
+    if (adapters?.storage) {
+      try {
+        const isReady = typeof adapters.storage.pool?.query === 'function';
+        if (isReady) {
+          await adapters.storage.pool.query('SELECT 1');
+          components.storage = { status: 'healthy', type: adapters.storage.pool ? 'postgres' : 'memory' };
+        } else {
+          components.storage = { status: 'healthy', type: 'memory' };
+        }
+      } catch {
+        components.storage = { status: 'unhealthy', type: 'postgres' };
+        overall = 'unhealthy';
+      }
+    }
+
+    // Trace adapter check (circuit breaker status)
+    if (adapters?.trace) {
+      const configured = adapters.trace.isConfigured();
+      if (typeof adapters.trace.getCircuitStatus === 'function') {
+        const circuit = adapters.trace.getCircuitStatus();
+        const status = circuit.state === 'OPEN' ? 'degraded'
+          : circuit.state === 'HALF_OPEN' ? 'degraded'
+          : 'healthy';
+        if (status === 'degraded' && overall === 'healthy') overall = 'degraded';
+        components.trace = { status, type: 'debugprobe', circuit: circuit.state };
+      } else {
+        components.trace = { status: configured ? 'healthy' : 'unconfigured', type: configured ? 'active' : 'noop' };
+      }
+    }
+
+    // Analyzer check (circuit breaker status)
+    if (adapters?.analyzer) {
+      const configured = adapters.analyzer.isConfigured();
+      if (typeof adapters.analyzer.getCircuitStatus === 'function') {
+        const circuit = adapters.analyzer.getCircuitStatus();
+        const status = circuit.state === 'OPEN' ? 'degraded'
+          : circuit.state === 'HALF_OPEN' ? 'degraded'
+          : 'healthy';
+        if (status === 'degraded' && overall === 'healthy') overall = 'degraded';
+        components.analyzer = { status, type: 'manifest', circuit: circuit.state };
+      } else {
+        components.analyzer = { status: configured ? 'healthy' : 'unconfigured', type: configured ? 'active' : 'noop' };
+      }
+    }
+
+    // AI adapter check
+    if (adapters?.ai) {
+      components.ai = {
+        status: adapters.ai.isConfigured() ? 'healthy' : 'unconfigured',
+        type: adapters.ai.isConfigured() ? 'claude' : 'noop',
+      };
+    }
+
+    const httpStatus = overall === 'unhealthy' ? 503 : 200;
+    res.status(httpStatus).json({
+      status: overall,
+      timestamp: Date.now(),
+      uptime: process.uptime(),
+      components,
+    });
   });
 
   // ── Auth & rate limiting ────────────────────

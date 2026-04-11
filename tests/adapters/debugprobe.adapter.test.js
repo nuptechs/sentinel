@@ -107,6 +107,7 @@ describe('DebugProbeTraceAdapter', () => {
         statusCode: 200,
         _headers: {},
         getHeaders: () => res._headers,
+        setHeader: (k, v) => { res._headers[k] = v; },
         end: () => {},
       };
       return res;
@@ -199,7 +200,7 @@ describe('DebugProbeTraceAdapter', () => {
           },
           get: (name) => req.headers[name.toLowerCase()],
         };
-        const res = { statusCode: 200, _headers: {}, getHeaders: () => ({}), end: () => {} };
+        const res = { statusCode: 200, _headers: {}, getHeaders: () => ({}), setHeader: () => {}, end: () => {} };
         middleware(req, res, () => {});
         res.end();
       }

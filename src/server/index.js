@@ -28,8 +28,8 @@ async function main() {
   await initializeContainer();
   const { services, adapters } = await getContainer();
 
-  // Create the full Express app
-  const app = createApp(services);
+  // Create the full Express app (pass adapters for health checks)
+  const app = createApp(services, adapters);
 
   // Start data retention cleanup (PostgreSQL only)
   if (adapters.storage.pool) {

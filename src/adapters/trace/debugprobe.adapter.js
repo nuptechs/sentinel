@@ -1,29 +1,34 @@
 // ─────────────────────────────────────────────
-// Sentinel — Adapter: DebugProbe Trace
-// Captures HTTP requests and SQL queries in the
-// monitored backend via middleware + pool wrapping.
-// Stores traces in-memory keyed by session/correlation.
+// Sentinel — Adapter: DebugProbe Trace (v2)
+//
+// Captures HTTP requests and SQL queries from the
+// monitored backend. Uses AsyncLocalStorage for
+// per-request context isolation and W3C Trace Context
+// for interoperability with OpenTelemetry / APMs.
+//
+// v2 changes from v1:
+//   - AsyncLocalStorage replaces global _activeEntry
+//     (fixes race condition under concurrent requests)
+//   - W3C traceparent header support
+//   - Circuit breaker for remote Debug Probe API calls
+//   - Backward-compatible with existing X-Sentinel-* headers
+//
 // ─────────────────────────────────────────────
 
 import { TracePort } from '../../core/ports/trace.port.js';
-import { v4 as uuid } from 'uuid';
+import { runInContext, getTraceEntry } from '../../core/infra/async-context.js';
+import { createTraceContext, formatTraceparent } from '../../core/infra/trace-context.js';
+import { CircuitBreaker } from '../../core/infra/circuit-breaker.js';
+import { randomUUID } from 'node:crypto';
 
-/**
- * DebugProbe captures traces from:
- * 1. Express middleware → HTTP request/response (method, path, status, timing)
- * 2. Pool wrapper → SQL queries (query, params, duration)
- *
- * Traces are correlated via X-Sentinel-Correlation header or X-Request-Id.
- * They are stored in-memory with LRU eviction by maxTraces.
- */
 export class DebugProbeTraceAdapter extends TracePort {
   /**
    * @param {object} [options]
-   * @param {number} [options.maxTraces=10000] — max traces to keep in memory
-   * @param {number} [options.maxAgeSec=3600]  — evict traces older than this
-   * @param {string} [options.baseUrl]         — remote Debug Probe API base URL
-   * @param {string} [options.apiKey]          — optional bearer token for Debug Probe API
-   * @param {number} [options.timeoutMs=5000]  — timeout for remote API calls
+   * @param {number} [options.maxTraces=10000]
+   * @param {number} [options.maxAgeSec=3600]
+   * @param {string} [options.baseUrl]
+   * @param {string} [options.apiKey]
+   * @param {number} [options.timeoutMs=5000]
    */
   constructor({
     maxTraces = 10_000,
@@ -39,12 +44,26 @@ export class DebugProbeTraceAdapter extends TracePort {
     this.apiKey = apiKey || null;
     this.timeoutMs = timeoutMs;
 
-    // Store: Map<correlationId, TraceEntry>
-    // TraceEntry = { correlationId, sessionId, request, response, queries[], createdAt }
+    // Primary store: Map<correlationId, TraceEntry>
     this.traces = new Map();
 
     // Secondary index: Map<sessionId, Set<correlationId>>
     this.sessionIndex = new Map();
+
+    // Circuit breaker for remote Debug Probe API
+    this._remoteBreaker = new CircuitBreaker({
+      name: 'debugprobe-remote',
+      failureThreshold: 3,
+      windowMs: 60_000,
+      recoveryMs: 30_000,
+      timeoutMs: this.timeoutMs,
+      isFailure: (err) => {
+        // Only count network/server errors as failures,
+        // not 4xx client errors (those are our fault)
+        if (err?.status >= 400 && err?.status < 500) return false;
+        return true;
+      },
+    });
   }
 
   // ── TracePort interface ───────────────────
@@ -53,14 +72,23 @@ export class DebugProbeTraceAdapter extends TracePort {
     const fromTime = this._toTimestamp(since);
     const toTime = this._toTimestamp(until);
 
+    // Try remote Debug Probe API first (if configured)
     if (this.baseUrl) {
       try {
-        return await this._fetchRemoteTraces(sessionId, { since: fromTime, until: toTime, limit });
+        return await this._remoteBreaker.fire(
+          () => this._fetchRemoteTraces(sessionId, { since: fromTime, until: toTime, limit }),
+          // Fallback: return local traces if circuit is open
+          undefined,
+        );
       } catch (err) {
-        console.warn(`[Sentinel] Debug Probe remote fetch failed for session ${sessionId}:`, err.message);
+        // Circuit open or fetch failed — fall through to local store
+        if (!err.isCircuitOpen) {
+          console.warn(`[Sentinel] Debug Probe remote fetch failed for session ${sessionId}:`, err.message);
+        }
       }
     }
 
+    // Local in-memory store
     const correlationIds = this.sessionIndex.get(sessionId);
     if (!correlationIds) return [];
 
@@ -84,44 +112,56 @@ export class DebugProbeTraceAdapter extends TracePort {
   }
 
   /**
-   * Express middleware that captures HTTP request/response details.
-   * Must be placed AFTER request-id middleware and BEFORE route handlers.
+   * Express middleware that captures HTTP request/response.
    *
-   * Looks for session ID in:
-   *   - X-Sentinel-Session header
-   *   - req.sentinelSessionId (set by SDK)
-   *   - query param ?_sentinel_session=...
+   * Key design decisions:
+   *   1. AsyncLocalStorage isolates each request's trace entry.
+   *      The wrapPool() DB interceptor reads from the SAME context,
+   *      so queries are correctly attributed to their originating
+   *      request — even under concurrent load.
+   *
+   *   2. W3C traceparent is parsed from incoming headers and
+   *      propagated. This enables distributed tracing across
+   *      microservices using OpenTelemetry or any W3C-compliant APM.
+   *
+   *   3. Backward-compatible with X-Sentinel-Session,
+   *      X-Sentinel-Correlation, and X-Request-Id headers.
    */
   createMiddleware() {
-    return (req, res, next) => {
-      const correlationId = req.get('X-Sentinel-Correlation')
-        || req.get('X-Request-Id')
-        || uuid();
+    const adapter = this;
 
+    return (req, res, next) => {
       const sessionId = req.get('X-Sentinel-Session')
         || req.sentinelSessionId
         || req.query?._sentinel_session
         || null;
 
       if (!sessionId) {
-        // Without a session, we can't correlate — skip capture
         return next();
       }
+
+      // Resolve trace & correlation identifiers
+      const traceCtx = createTraceContext(req.get('traceparent'));
+      const correlationId = req.get('X-Sentinel-Correlation')
+        || req.get('X-Request-Id')
+        || traceCtx.parentId;
 
       const startTime = Date.now();
       const startHrTime = process.hrtime.bigint();
 
-      // Create trace entry
+      // Build the mutable trace entry for this request
       const entry = {
         correlationId,
         sessionId,
+        traceId: traceCtx.traceId,
+        spanId: traceCtx.parentId,
         request: {
           method: req.method,
           path: req.path,
           url: req.originalUrl,
-          headers: this._sanitizeHeaders(req.headers),
+          headers: adapter._sanitizeHeaders(req.headers),
           query: req.query,
-          body: this._truncateBody(req.body),
+          body: adapter._truncateBody(req.body),
           ip: req.ip,
         },
         response: null,
@@ -129,38 +169,55 @@ export class DebugProbeTraceAdapter extends TracePort {
         createdAt: startTime,
       };
 
-      // Expose correlation ID for SQL wrapping
+      // Expose for downstream code that reads from req
       req._sentinelCorrelation = correlationId;
       req._sentinelTraceEntry = entry;
 
-      // Set active entry so wrapPool() can correlate SQL queries to this request
-      this.setActiveEntry(entry);
+      // Set W3C traceparent on the response for downstream propagation
+      if (typeof res.setHeader === 'function') {
+        res.setHeader('traceparent', formatTraceparent(traceCtx));
+      }
 
       // Capture response on finish
       const originalEnd = res.end;
-      res.end = (...args) => {
+      res.end = function sentinelResponseEnd(...args) {
         const durationNs = process.hrtime.bigint() - startHrTime;
         entry.response = {
           statusCode: res.statusCode,
-          headers: this._sanitizeHeaders(res.getHeaders()),
+          headers: adapter._sanitizeHeaders(res.getHeaders()),
           durationMs: Number(durationNs) / 1e6,
         };
-
-        // Clear active entry to avoid cross-request leakage
-        this._activeEntry = null;
-
-        this._store(entry);
+        adapter._store(entry);
         return originalEnd.apply(res, args);
       };
 
-      next();
+      // Run the rest of the middleware chain inside an
+      // AsyncLocalStorage context. Every downstream operation
+      // (including DB queries) can read `getTraceEntry()` to
+      // find THIS request's trace entry — no global state needed.
+      runInContext(
+        {
+          correlationId,
+          sessionId,
+          traceId: traceCtx.traceId,
+          spanId: traceCtx.parentId,
+          traceEntry: entry,
+        },
+        () => next(),
+      );
     };
   }
 
   /**
    * Wrap a pg Pool to intercept SQL queries.
-   * Each query is tagged with the current correlation ID
-   * (set by middleware via AsyncLocalStorage patterns or req attachment).
+   *
+   * v2: Uses AsyncLocalStorage via getTraceEntry() to find the
+   * correct trace entry for the current request. This eliminates
+   * the race condition where concurrent requests would write
+   * to each other's trace entries.
+   *
+   * If called outside a request context (e.g., startup, migration),
+   * queries are silently ignored — they don't belong to any trace.
    */
   wrapPool(pool) {
     const adapter = this;
@@ -169,33 +226,31 @@ export class DebugProbeTraceAdapter extends TracePort {
     pool.query = function sentinelWrappedQuery(...args) {
       const sql = typeof args[0] === 'string' ? args[0] : args[0]?.text;
       const params = typeof args[0] === 'string' ? args[1] : args[0]?.values;
-
       const startHr = process.hrtime.bigint();
 
       const resultPromise = originalQuery(...args);
 
-      // Attach timing after query completes
       resultPromise.then(
         (result) => {
-          const durationNs = process.hrtime.bigint() - startHr;
+          const durationMs = Number(process.hrtime.bigint() - startHr) / 1e6;
           adapter._recordQuery({
             sql,
             params: adapter._sanitizeParams(params),
-            durationMs: Number(durationNs) / 1e6,
+            durationMs,
             rowCount: result?.rowCount ?? null,
             error: null,
           });
         },
         (err) => {
-          const durationNs = process.hrtime.bigint() - startHr;
+          const durationMs = Number(process.hrtime.bigint() - startHr) / 1e6;
           adapter._recordQuery({
             sql,
             params: adapter._sanitizeParams(params),
-            durationMs: Number(durationNs) / 1e6,
+            durationMs,
             rowCount: null,
             error: err.message,
           });
-        }
+        },
       );
 
       return resultPromise;
@@ -208,7 +263,25 @@ export class DebugProbeTraceAdapter extends TracePort {
     return true;
   }
 
-  // ── Internal helpers ──────────────────────
+  // ── Internal: query recording ─────────────
+
+  /**
+   * Record a query into the current request's trace entry.
+   *
+   * v2: Reads the trace entry from AsyncLocalStorage context.
+   * If no context exists (call outside request lifecycle),
+   * the query is silently dropped — this is intentional.
+   */
+  _recordQuery(queryInfo) {
+    const entry = getTraceEntry();
+    if (entry) {
+      entry.queries.push(queryInfo);
+    }
+    // No context = query outside a traced request (startup, migration, etc.)
+    // Silently ignoring is correct behavior.
+  }
+
+  // ── Internal: remote API ──────────────────
 
   async _fetchRemoteTraces(sessionId, { since, until, limit = 500 } = {}) {
     const params = new URLSearchParams({
@@ -227,10 +300,10 @@ export class DebugProbeTraceAdapter extends TracePort {
     const grouped = new Map();
 
     for (const event of events) {
-      const correlationId = event?.correlationId || event?.requestId || event?.id || uuid();
-      if (!grouped.has(correlationId)) {
-        grouped.set(correlationId, {
-          correlationId,
+      const cid = event?.correlationId || event?.requestId || event?.id || randomUUID();
+      if (!grouped.has(cid)) {
+        grouped.set(cid, {
+          correlationId: cid,
           sessionId: event?.sessionId || sessionId,
           request: null,
           response: null,
@@ -239,7 +312,7 @@ export class DebugProbeTraceAdapter extends TracePort {
         });
       }
 
-      const entry = grouped.get(correlationId);
+      const entry = grouped.get(cid);
       entry.createdAt = Math.min(entry.createdAt, this._toTimestamp(event?.timestamp) || entry.createdAt);
 
       const data = event?.data || event?.payload || {};
@@ -298,7 +371,9 @@ export class DebugProbeTraceAdapter extends TracePort {
       });
 
       if (!response.ok) {
-        throw new Error(`Debug Probe API error: ${response.status}`);
+        const err = new Error(`Debug Probe API error: ${response.status}`);
+        err.status = response.status;
+        throw err;
       }
 
       return await response.json();
@@ -307,18 +382,11 @@ export class DebugProbeTraceAdapter extends TracePort {
     }
   }
 
-  _toTimestamp(value) {
-    if (value == null) return null;
-    if (typeof value === 'number' && Number.isFinite(value)) return value;
-    if (value instanceof Date) return value.getTime();
-    const parsed = Date.parse(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
+  // ── Internal: storage ─────────────────────
 
   _store(entry) {
     this.traces.set(entry.correlationId, entry);
 
-    // Update session index
     if (entry.sessionId) {
       if (!this.sessionIndex.has(entry.sessionId)) {
         this.sessionIndex.set(entry.sessionId, new Set());
@@ -326,7 +394,7 @@ export class DebugProbeTraceAdapter extends TracePort {
       this.sessionIndex.get(entry.sessionId).add(entry.correlationId);
     }
 
-    // LRU eviction
+    // LRU eviction — remove oldest when over capacity
     if (this.traces.size > this.maxTraces) {
       const oldestKey = this.traces.keys().next().value;
       this._evict(oldestKey);
@@ -345,29 +413,23 @@ export class DebugProbeTraceAdapter extends TracePort {
     this.traces.delete(correlationId);
   }
 
-  _recordQuery(queryInfo) {
-    // Since we can't use AsyncLocalStorage without extra wiring,
-    // queries are recorded to a "pending" buffer.
-    // The middleware associates them via timing/correlation.
-    // For the MVP, queries are appended to the most recent trace entry.
-    if (this._activeEntry) {
-      this._activeEntry.queries.push(queryInfo);
-    }
+  _toTimestamp(value) {
+    if (value == null) return null;
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (value instanceof Date) return value.getTime();
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
   }
 
-  /**
-   * Call this inside the middleware chain to set the active entry
-   * for SQL correlation within the same request lifecycle.
-   */
-  setActiveEntry(entry) {
-    this._activeEntry = entry;
-  }
+  // ── Internal: formatting ──────────────────
 
   _formatTrace(entry) {
     return {
       type: 'http_request',
       correlationId: entry.correlationId,
       sessionId: entry.sessionId,
+      traceId: entry.traceId || null,
+      spanId: entry.spanId || null,
       timestamp: entry.createdAt,
       payload: {
         path: entry.request?.path,
@@ -381,10 +443,11 @@ export class DebugProbeTraceAdapter extends TracePort {
     };
   }
 
+  // ── Internal: sanitization ────────────────
+
   _sanitizeHeaders(headers) {
     if (!headers) return {};
     const sanitized = { ...headers };
-    // Remove sensitive headers
     delete sanitized.authorization;
     delete sanitized.cookie;
     delete sanitized['set-cookie'];
@@ -409,16 +472,16 @@ export class DebugProbeTraceAdapter extends TracePort {
     });
   }
 
-  /**
-   * Get total trace count (for monitoring).
-   */
+  // ── Public: observability ─────────────────
+
   get size() {
     return this.traces.size;
   }
 
-  /**
-   * Clear all traces (for testing).
-   */
+  getCircuitStatus() {
+    return this._remoteBreaker.getStatus();
+  }
+
   clear() {
     this.traces.clear();
     this.sessionIndex.clear();
