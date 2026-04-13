@@ -7,88 +7,7 @@ import { StoragePort } from '../../core/ports/storage.port.js';
 import { Session } from '../../core/domain/session.js';
 import { Finding } from '../../core/domain/finding.js';
 import { CaptureEvent } from '../../core/domain/capture-event.js';
-
-const SCHEMA_SQL = `
-  CREATE TABLE IF NOT EXISTS sentinel_sessions (
-    id            UUID PRIMARY KEY,
-    project_id    TEXT NOT NULL,
-    user_id       TEXT,
-    user_agent    TEXT,
-    page_url      TEXT,
-    status        TEXT NOT NULL DEFAULT 'active',
-    metadata      JSONB DEFAULT '{}',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    completed_at  TIMESTAMPTZ
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_sentinel_sessions_project
-    ON sentinel_sessions (project_id, created_at DESC);
-
-  CREATE TABLE IF NOT EXISTS sentinel_events (
-    id              UUID PRIMARY KEY,
-    session_id      UUID NOT NULL REFERENCES sentinel_sessions(id) ON DELETE CASCADE,
-    type            TEXT NOT NULL,
-    source          TEXT NOT NULL,
-    timestamp       BIGINT NOT NULL,
-    payload         JSONB NOT NULL,
-    correlation_id  TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_sentinel_events_session
-    ON sentinel_events (session_id, timestamp);
-  CREATE INDEX IF NOT EXISTS idx_sentinel_events_correlation
-    ON sentinel_events (correlation_id) WHERE correlation_id IS NOT NULL;
-
-  CREATE TABLE IF NOT EXISTS sentinel_findings (
-    id               UUID PRIMARY KEY,
-    session_id       UUID NOT NULL REFERENCES sentinel_sessions(id) ON DELETE CASCADE,
-    project_id       TEXT NOT NULL,
-    source           TEXT NOT NULL,
-    type             TEXT NOT NULL,
-    severity         TEXT NOT NULL DEFAULT 'medium',
-    status           TEXT NOT NULL DEFAULT 'open',
-    title            TEXT NOT NULL,
-    description      TEXT,
-    page_url         TEXT,
-    css_selector     TEXT,
-    screenshot_url   TEXT,
-    annotation       JSONB,
-    browser_context  JSONB,
-    backend_context  JSONB,
-    code_context     JSONB,
-    diagnosis        JSONB,
-    correction       JSONB,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_sentinel_findings_session
-    ON sentinel_findings (session_id, created_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_sentinel_findings_project
-    ON sentinel_findings (project_id, status, created_at DESC);
-
-  CREATE TABLE IF NOT EXISTS sentinel_traces (
-    id              BIGSERIAL PRIMARY KEY,
-    session_id      TEXT NOT NULL,
-    correlation_id  TEXT NOT NULL,
-    trace_id        TEXT,
-    span_id         TEXT,
-    request         JSONB,
-    response        JSONB,
-    queries         JSONB DEFAULT '[]',
-    duration_ms     DOUBLE PRECISION,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  );
-
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_sentinel_traces_correlation
-    ON sentinel_traces (correlation_id);
-  CREATE INDEX IF NOT EXISTS idx_sentinel_traces_session
-    ON sentinel_traces (session_id, created_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_sentinel_traces_created
-    ON sentinel_traces (created_at);
-`;
+import { runMigrations } from './migrations.js';
 
 export class PostgresStorageAdapter extends StoragePort {
   /**
@@ -388,7 +307,7 @@ export class PostgresStorageAdapter extends StoragePort {
   // ── Lifecycle ─────────────────────────────
 
   async initialize() {
-    await this.pool.query(SCHEMA_SQL);
+    await runMigrations(this.pool);
   }
 
   async close() {

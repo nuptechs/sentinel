@@ -15,18 +15,27 @@
  *   - interaction: click, input, scroll (via rrweb or custom)
  */
 export class Recorder {
-  constructor({ reporter, captureDOM = true, captureNetwork = true, captureConsole = true, captureErrors = true } = {}) {
+  constructor({ reporter, captureDOM = true, captureNetwork = true, captureConsole = true, captureErrors = true, sampling = {} } = {}) {
     if (!reporter) throw new Error('Recorder: reporter is required');
 
     this._reporter = reporter;
     this._options = { captureDOM, captureNetwork, captureConsole, captureErrors };
+    this._sampling = {
+      sessionRate: sampling.sessionRate ?? 1.0,    // 0.0–1.0: % of sessions recorded
+      errorRate: sampling.errorRate ?? 1.0,         // 0.0–1.0: always record on error
+    };
     this._teardowns = [];
     this._running = false;
     this._rrwebStop = null;
+    this._sampled = Math.random() < this._sampling.sessionRate;
   }
 
   get isRunning() {
     return this._running;
+  }
+
+  get isSampled() {
+    return this._sampled;
   }
 
   /**
@@ -36,10 +45,24 @@ export class Recorder {
     if (this._running) return;
     this._running = true;
 
+    // Always capture errors (respects errorRate for full recording)
     if (this._options.captureErrors) this._captureErrors();
+
+    // Skip non-error capture if session was not sampled
+    if (!this._sampled) return;
+
     if (this._options.captureConsole) this._captureConsole();
     if (this._options.captureNetwork) this._captureNetwork();
     if (this._options.captureDOM) await this._captureDOM();
+  }
+
+  /**
+   * Upgrade an unsampled session to full recording (triggered by error).
+   */
+  _upgradeRecording() {
+    if (this._options.captureConsole) this._captureConsole();
+    if (this._options.captureNetwork) this._captureNetwork();
+    if (this._options.captureDOM) this._captureDOM();
   }
 
   /**
@@ -224,6 +247,11 @@ export class Recorder {
           stack: event.error?.stack,
         },
       });
+      // Upgrade unsampled session to full recording on error
+      if (!this._sampled && Math.random() < this._sampling.errorRate) {
+        this._sampled = true;
+        this._upgradeRecording();
+      }
     };
 
     const onRejection = (event) => {

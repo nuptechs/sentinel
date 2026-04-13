@@ -7,13 +7,14 @@ const DEFAULT_BATCH_SIZE = 50;
 const DEFAULT_FLUSH_INTERVAL = 3000; // 3s
 
 export class Reporter {
-  constructor({ serverUrl, projectId, sessionId = null, batchSize, flushInterval } = {}) {
+  constructor({ serverUrl, projectId, sessionId = null, apiKey = null, batchSize, flushInterval } = {}) {
     if (!serverUrl) throw new Error('Reporter: serverUrl is required');
     if (!projectId) throw new Error('Reporter: projectId is required');
 
     this._serverUrl = serverUrl.replace(/\/$/, '');
     this._projectId = projectId;
     this._sessionId = sessionId;
+    this._apiKey = apiKey;
     this._batchSize = batchSize || DEFAULT_BATCH_SIZE;
     this._flushInterval = flushInterval || DEFAULT_FLUSH_INTERVAL;
     this._buffer = [];
@@ -134,16 +135,21 @@ export class Reporter {
    */
   destroy() {
     this._stopFlushTimer();
-    // Use sendBeacon for remaining events
-    if (this._buffer.length > 0 && this._sessionId && navigator.sendBeacon) {
-      const blob = new Blob(
-        [JSON.stringify({ events: this._buffer })],
-        { type: 'application/json' }
-      );
-      navigator.sendBeacon(
-        `${this._serverUrl}/api/sessions/${this._sessionId}/events`,
-        blob
-      );
+    // Flush remaining events on page unload
+    if (this._buffer.length > 0 && this._sessionId) {
+      const body = JSON.stringify({ events: this._buffer });
+      const url = `${this._serverUrl}/api/sessions/${this._sessionId}/events`;
+      const headers = { 'Content-Type': 'application/json', 'X-Sentinel-SDK': 'browser/1.0' };
+      if (this._apiKey) headers['X-Sentinel-Key'] = this._apiKey;
+
+      // Prefer fetch+keepalive (supports headers); fall back to sendBeacon
+      try {
+        fetch(url, { method: 'POST', headers, body, keepalive: true });
+      } catch {
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }));
+        }
+      }
       this._buffer = [];
     }
   }
@@ -163,13 +169,19 @@ export class Reporter {
   }
 
   async _fetch(path, options = {}) {
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-Sentinel-SDK': 'browser/1.0',
+      ...options.headers,
+    };
+
+    if (this._apiKey) {
+      headers['X-Sentinel-Key'] = this._apiKey;
+    }
+
     const res = await fetch(`${this._serverUrl}${path}`, {
       ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Sentinel-SDK': 'browser/1.0',
-        ...options.headers,
-      },
+      headers,
     });
 
     if (!res.ok) {

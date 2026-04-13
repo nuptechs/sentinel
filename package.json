@@ -15,6 +15,7 @@
     "dev": "node --watch src/server/index.js",
     "start": "node src/server/index.js",
     "test": "node --test tests/**/*.test.js",
+    "test:coverage": "node --test --experimental-test-coverage tests/**/*.test.js",
     "mcp": "node src/mcp/index.js",
     "lint": "eslint src/"
   },
@@ -26,7 +27,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "compression": "^1.8.0",
     "cors": "^2.8.5",
-    "express": "^5.1.0",
+    "express": "^5.2.1",
     "helmet": "^8.1.0",
     "pg": "^8.13.0",
     "uuid": "^11.1.0",

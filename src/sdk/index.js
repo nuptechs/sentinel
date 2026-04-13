@@ -29,11 +29,13 @@ export async function init({
   serverUrl,
   projectId,
   userId,
+  apiKey,
   metadata,
   captureDOM = true,
   captureNetwork = true,
   captureConsole = true,
   captureErrors = true,
+  sampling,
   annotator = true,
   annotatorPosition = 'bottom-right',
   annotatorVersion = 'v2',
@@ -43,7 +45,7 @@ export async function init({
   if (!serverUrl) throw new Error('Sentinel: serverUrl is required');
   if (!projectId) throw new Error('Sentinel: projectId is required');
 
-  const reporter = new Reporter({ serverUrl, projectId, batchSize, flushInterval });
+  const reporter = new Reporter({ serverUrl, projectId, apiKey, batchSize, flushInterval });
   const session = await reporter.startSession({ userId, metadata });
 
   const recorder = new Recorder({
@@ -52,6 +54,7 @@ export async function init({
     captureNetwork,
     captureConsole,
     captureErrors,
+    sampling,
   });
   await recorder.start();
 

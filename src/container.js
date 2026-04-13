@@ -17,6 +17,7 @@ import { GitHubIssueAdapter } from './adapters/issue-tracker/github.adapter.js';
 import { LinearIssueAdapter } from './adapters/issue-tracker/linear.adapter.js';
 import { JiraIssueAdapter } from './adapters/issue-tracker/jira.adapter.js';
 import { NoopIssueTrackerAdapter } from './adapters/issue-tracker/noop.adapter.js';
+import { NoopCaptureAdapter } from './adapters/capture/noop.adapter.js';
 
 import { SessionService } from './core/services/session.service.js';
 import { FindingService } from './core/services/finding.service.js';
@@ -86,6 +87,7 @@ async function buildAdapters() {
   const storage = await buildStorage();
   return {
     storage,
+    capture: new NoopCaptureAdapter(),
     trace: buildTrace(storage),
     analyzer: buildAnalyzer(),
     ai: buildAI(),

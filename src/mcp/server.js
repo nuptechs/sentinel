@@ -5,7 +5,7 @@
 // coding agents (Cursor, Claude Code, Copilot)
 //
 // Uses @modelcontextprotocol/sdk v1.x
-// Transport: stdio or HTTP/SSE (via SDK transports)
+// Transport: stdio or Streamable HTTP (spec 2025-11-25)
 // ─────────────────────────────────────────────
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';

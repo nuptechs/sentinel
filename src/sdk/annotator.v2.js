@@ -15,6 +15,7 @@ export class Annotator {
     this._recorder = recorder || null;
     this._position = position;
     this._serverUrl = serverUrl || reporter._serverUrl || '';
+    this._apiKey = reporter._apiKey || null;
     this._root = null;
     this._panel = null;
     this._isOpen = false;
@@ -617,9 +618,12 @@ export class Annotator {
     suggestBtn.textContent = '⏳ Analyzing...';
 
     try {
+      const headers = { 'Content-Type': 'application/json', 'X-Sentinel-SDK': 'browser/2.0' };
+      if (this._apiKey) headers['X-Sentinel-Key'] = this._apiKey;
+
       const res = await fetch(`${this._serverUrl}/api/findings/suggest-title`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Sentinel-SDK': 'browser/2.0' },
+        headers,
         body: JSON.stringify({
           description,
           pageUrl: location.href,
