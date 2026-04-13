@@ -26,16 +26,24 @@ describe('PostgresStorageAdapter (real PG)', () => {
     const { rows } = await pool.query('SELECT 1 AS connected');
     assert.equal(rows[0].connected, 1);
 
-    adapter = new PostgresStorageAdapter({ pool });
-    await adapter.initialize(); // Creates tables + indexes
-  });
-
-  after(async () => {
-    // Clean up tables, then close pool
+    // Drop all sentinel tables (including migrations) to ensure clean state
     await pool.query('DROP TABLE IF EXISTS sentinel_traces CASCADE');
     await pool.query('DROP TABLE IF EXISTS sentinel_events CASCADE');
     await pool.query('DROP TABLE IF EXISTS sentinel_findings CASCADE');
     await pool.query('DROP TABLE IF EXISTS sentinel_sessions CASCADE');
+    await pool.query('DROP TABLE IF EXISTS sentinel_migrations CASCADE');
+
+    adapter = new PostgresStorageAdapter({ pool });
+    await adapter.initialize(); // Creates tables + indexes via migrations
+  });
+
+  after(async () => {
+    // Clean up all tables (including migrations), then close pool
+    await pool.query('DROP TABLE IF EXISTS sentinel_traces CASCADE');
+    await pool.query('DROP TABLE IF EXISTS sentinel_events CASCADE');
+    await pool.query('DROP TABLE IF EXISTS sentinel_findings CASCADE');
+    await pool.query('DROP TABLE IF EXISTS sentinel_sessions CASCADE');
+    await pool.query('DROP TABLE IF EXISTS sentinel_migrations CASCADE');
     await adapter.close();
   });
 
