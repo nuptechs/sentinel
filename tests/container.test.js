@@ -5,17 +5,17 @@
 
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { getContainer, resetContainer } from '../../src/container.js';
-import { MemoryStorageAdapter } from '../../src/adapters/storage/memory.adapter.js';
-import { ManifestAnalyzerAdapter } from '../../src/adapters/analyzer/manifest.adapter.js';
-import { NoopAnalyzerAdapter } from '../../src/adapters/analyzer/noop.adapter.js';
-import { ClaudeAIAdapter } from '../../src/adapters/ai/claude.adapter.js';
-import { WebhookNotificationAdapter } from '../../src/adapters/notification/webhook.adapter.js';
-import { NoopNotificationAdapter } from '../../src/adapters/notification/noop.adapter.js';
-import { GitHubIssueAdapter } from '../../src/adapters/issue-tracker/github.adapter.js';
-import { LinearIssueAdapter } from '../../src/adapters/issue-tracker/linear.adapter.js';
-import { JiraIssueAdapter } from '../../src/adapters/issue-tracker/jira.adapter.js';
-import { NoopIssueTrackerAdapter } from '../../src/adapters/issue-tracker/noop.adapter.js';
+import { getContainer, resetContainer } from '../src/container.js';
+import { MemoryStorageAdapter } from '../src/adapters/storage/memory.adapter.js';
+import { ManifestAnalyzerAdapter } from '../src/adapters/analyzer/manifest.adapter.js';
+import { NoopAnalyzerAdapter } from '../src/adapters/analyzer/noop.adapter.js';
+import { ClaudeAIAdapter } from '../src/adapters/ai/claude.adapter.js';
+import { WebhookNotificationAdapter } from '../src/adapters/notification/webhook.adapter.js';
+import { NoopNotificationAdapter } from '../src/adapters/notification/noop.adapter.js';
+import { GitHubIssueAdapter } from '../src/adapters/issue-tracker/github.adapter.js';
+import { LinearIssueAdapter } from '../src/adapters/issue-tracker/linear.adapter.js';
+import { JiraIssueAdapter } from '../src/adapters/issue-tracker/jira.adapter.js';
+import { NoopIssueTrackerAdapter } from '../src/adapters/issue-tracker/noop.adapter.js';
 
 // ── Env helpers ───────────────────────────────
 
