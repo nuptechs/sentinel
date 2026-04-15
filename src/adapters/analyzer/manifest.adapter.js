@@ -43,7 +43,7 @@ export class ManifestAnalyzerAdapter extends AnalyzerPort {
       recoveryMs: 30_000,
       timeoutMs: this.timeoutMs,
       isFailure: (err) => {
-        if (err instanceof IntegrationError && err.context?.status >= 400 && err.context?.status < 500) {
+        if (err instanceof IntegrationError && err.details?.status >= 400 && err.details?.status < 500) {
           return false;
         }
         return true;

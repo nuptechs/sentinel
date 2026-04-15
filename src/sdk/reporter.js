@@ -24,12 +24,11 @@ export class Reporter {
 
     // BatchSender handles the ring buffer, circuit breaker, and transport
     this._sender = new BatchSender({
-      endpoint: '', // Set dynamically once sessionId is known
+      url: this._serverUrl,
       apiKey: this._apiKey,
       batchSize: this._batchSize,
-      flushMs: this._flushInterval,
-      capacity: bufferCapacity || DEFAULT_BUFFER_CAPACITY,
-      autoFlush: false, // We control the flush timer ourselves
+      flushInterval: this._flushInterval,
+      maxBufferSize: bufferCapacity || DEFAULT_BUFFER_CAPACITY,
     });
   }
 
@@ -58,8 +57,8 @@ export class Reporter {
     });
 
     this._sessionId = res.data.id;
-    // Point BatchSender at the session events endpoint
-    this._sender._endpoint = `${this._serverUrl}/api/sessions/${this._sessionId}/events`;
+    // Tell BatchSender which session to flush to
+    this._sender.sessionId = this._sessionId;
     this._startFlushTimer();
     return res.data;
   }
@@ -73,9 +72,7 @@ export class Reporter {
       this._sender.push(evt);
     }
 
-    if (this._sender._count >= this._batchSize) {
-      this.flush();
-    }
+    // BatchSender auto-flushes internally when batchSize is reached
   }
 
   /**
