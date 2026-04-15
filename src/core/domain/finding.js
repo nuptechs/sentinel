@@ -32,6 +32,7 @@ export class Finding {
    * @param {object}  [props.browserContext]    — { errors, network, console }
    * @param {object}  [props.backendContext]    — { traces, queries }
    * @param {object}  [props.codeContext]       — { endpoint, controller, service, callChain }
+   * @param {object[]} [props.media]            — [{ id, type: 'audio'|'video', mimeType, size, url }]
    * @param {object}  [props.diagnosis]         — AI diagnosis result
    * @param {object}  [props.correction]        — proposed code change
    * @param {Date}    [props.createdAt]
@@ -54,6 +55,7 @@ export class Finding {
     this.browserContext = props.browserContext || null;
     this.backendContext = props.backendContext || null;
     this.codeContext = props.codeContext || null;
+    this.media = props.media || [];
     this.diagnosis = props.diagnosis || null;
     this.correction = props.correction || null;
     this.createdAt = props.createdAt || new Date();
@@ -72,6 +74,11 @@ export class Finding {
 
   attachCodeContext(ctx) {
     this.codeContext = ctx;
+    this.updatedAt = new Date();
+  }
+
+  addMedia({ id, type, mimeType, size, url }) {
+    this.media.push({ id, type, mimeType, size, url, addedAt: new Date().toISOString() });
     this.updatedAt = new Date();
   }
 
@@ -124,6 +131,7 @@ export class Finding {
       browserContext: this.browserContext,
       backendContext: this.backendContext,
       codeContext: this.codeContext,
+      media: this.media,
       diagnosis: this.diagnosis,
       correction: this.correction,
       createdAt: this.createdAt.toISOString(),

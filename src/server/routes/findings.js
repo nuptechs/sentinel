@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { Router } from 'express';
+import { randomUUID as _randomUUID } from 'node:crypto';
 import { asyncHandler } from '../middleware/error-handler.js';
 import { ValidationError } from '../../core/errors.js';
 
@@ -137,6 +138,37 @@ export function createFindingRoutes(services) {
     const { description, screenshot, element, pageUrl, browserContext } = req.body;
     const suggestion = await services.integration.suggestTitle({ description, screenshot, element, pageUrl, browserContext });
     res.json({ success: true, data: suggestion });
+  }));
+
+  // POST /api/findings/:id/media — Upload audio/video blob for a finding
+  router.post('/:id/media', asyncHandler(async (req, res) => {
+    const finding = await services.findings.get(req.params.id);
+
+    const { type, mimeType, data } = req.body;
+    if (!type || !['audio', 'video'].includes(type)) throw new ValidationError('type must be "audio" or "video"');
+    if (!data) throw new ValidationError('data (base64-encoded blob) is required');
+
+    // Validate size: 10MB audio, 50MB video
+    const maxBytes = type === 'audio' ? 10 * 1024 * 1024 : 50 * 1024 * 1024;
+    const sizeEstimate = Math.ceil((data.length * 3) / 4);
+    if (sizeEstimate > maxBytes) {
+      throw new ValidationError(`${type} exceeds max size of ${maxBytes / (1024 * 1024)}MB`);
+    }
+
+    const mediaId = _randomUUID();
+    finding.addMedia({
+      id: mediaId,
+      type,
+      mimeType: mimeType || (type === 'audio' ? 'audio/webm' : 'video/webm'),
+      size: sizeEstimate,
+      url: `/api/findings/${finding.id}/media/${mediaId}`,
+    });
+    await services.findings.storage.updateFinding(finding);
+
+    res.status(201).json({
+      success: true,
+      data: { mediaId, type, size: sizeEstimate, url: `/api/findings/${finding.id}/media/${mediaId}` },
+    });
   }));
 
   return router;

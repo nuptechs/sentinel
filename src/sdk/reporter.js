@@ -1,13 +1,17 @@
 // ─────────────────────────────────────────────
 // Sentinel SDK — Event Reporter
-// Sends captured events to the Sentinel server
+// Sends captured events to the Sentinel server.
+// Uses BatchSender (ring buffer + circuit breaker) internally.
 // ─────────────────────────────────────────────
 
+import { BatchSender } from './core/batch-sender.js';
+
 const DEFAULT_BATCH_SIZE = 50;
-const DEFAULT_FLUSH_INTERVAL = 3000; // 3s
+const DEFAULT_FLUSH_INTERVAL = 3000;
+const DEFAULT_BUFFER_CAPACITY = 10000;
 
 export class Reporter {
-  constructor({ serverUrl, projectId, sessionId = null, apiKey = null, batchSize, flushInterval } = {}) {
+  constructor({ serverUrl, projectId, sessionId = null, apiKey = null, batchSize, flushInterval, bufferCapacity } = {}) {
     if (!serverUrl) throw new Error('Reporter: serverUrl is required');
     if (!projectId) throw new Error('Reporter: projectId is required');
 
@@ -17,13 +21,25 @@ export class Reporter {
     this._apiKey = apiKey;
     this._batchSize = batchSize || DEFAULT_BATCH_SIZE;
     this._flushInterval = flushInterval || DEFAULT_FLUSH_INTERVAL;
-    this._buffer = [];
-    this._timer = null;
-    this._flushing = false;
+
+    // BatchSender handles the ring buffer, circuit breaker, and transport
+    this._sender = new BatchSender({
+      endpoint: '', // Set dynamically once sessionId is known
+      apiKey: this._apiKey,
+      batchSize: this._batchSize,
+      flushMs: this._flushInterval,
+      capacity: bufferCapacity || DEFAULT_BUFFER_CAPACITY,
+      autoFlush: false, // We control the flush timer ourselves
+    });
   }
 
   get sessionId() {
     return this._sessionId;
+  }
+
+  /** BatchSender metrics (sent, dropped, retries, breakerTrips) */
+  get metrics() {
+    return this._sender.metrics;
   }
 
   /**
@@ -42,18 +58,22 @@ export class Reporter {
     });
 
     this._sessionId = res.data.id;
+    // Point BatchSender at the session events endpoint
+    this._sender._endpoint = `${this._serverUrl}/api/sessions/${this._sessionId}/events`;
     this._startFlushTimer();
     return res.data;
   }
 
   /**
-   * Queue events for batched sending.
+   * Queue events for batched sending via ring buffer.
    */
   push(events) {
     const arr = Array.isArray(events) ? events : [events];
-    this._buffer.push(...arr);
+    for (const evt of arr) {
+      this._sender.push(evt);
+    }
 
-    if (this._buffer.length >= this._batchSize) {
+    if (this._sender._count >= this._batchSize) {
       this.flush();
     }
   }
@@ -62,23 +82,8 @@ export class Reporter {
    * Flush buffered events to the server.
    */
   async flush() {
-    if (this._flushing || this._buffer.length === 0 || !this._sessionId) return;
-
-    this._flushing = true;
-    const batch = this._buffer.splice(0, this._batchSize);
-
-    try {
-      await this._fetch(`/api/sessions/${this._sessionId}/events`, {
-        method: 'POST',
-        body: JSON.stringify({ events: batch }),
-      });
-    } catch (err) {
-      // Put events back at the front of the buffer for retry
-      this._buffer.unshift(...batch);
-      console.warn('[Sentinel] Failed to flush events:', err.message);
-    } finally {
-      this._flushing = false;
-    }
+    if (!this._sessionId) return;
+    await this._sender.flush();
   }
 
   /**
@@ -135,22 +140,9 @@ export class Reporter {
    */
   destroy() {
     this._stopFlushTimer();
-    // Flush remaining events on page unload
-    if (this._buffer.length > 0 && this._sessionId) {
-      const body = JSON.stringify({ events: this._buffer });
-      const url = `${this._serverUrl}/api/sessions/${this._sessionId}/events`;
-      const headers = { 'Content-Type': 'application/json', 'X-Sentinel-SDK': 'browser/1.0' };
-      if (this._apiKey) headers['X-Sentinel-Key'] = this._apiKey;
-
-      // Prefer fetch+keepalive (supports headers); fall back to sendBeacon
-      try {
-        fetch(url, { method: 'POST', headers, body, keepalive: true });
-      } catch {
-        if (navigator.sendBeacon) {
-          navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }));
-        }
-      }
-      this._buffer = [];
+    if (this._sessionId) {
+      this._sender.drainOnUnload();
+      this._sessionId = null;
     }
   }
 

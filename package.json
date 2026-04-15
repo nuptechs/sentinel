@@ -8,7 +8,12 @@
     "./core/*": "./src/core/*.js",
     "./adapters/*": "./src/adapters/*.js",
     "./server": "./src/server/index.js",
-    "./sdk": "./src/sdk/index.js",
+    "./sdk": {
+      "import": "./src/sdk/index.js",
+      "browser": "./dist/sdk/sentinel.esm.js"
+    },
+    "./sdk/integrations/*": "./src/sdk/integrations/*.js",
+    "./sdk/core/*": "./src/sdk/core/*.js",
     "./mcp": "./src/mcp/server.js"
   },
   "scripts": {
@@ -17,6 +22,7 @@
     "test": "node --test tests/**/*.test.js",
     "test:coverage": "node --test --experimental-test-coverage tests/**/*.test.js",
     "mcp": "node src/mcp/index.js",
+    "build:sdk": "node sdk/build.js",
     "lint": "eslint src/"
   },
   "engines": {
@@ -34,6 +40,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "esbuild": "^0.25.0",
     "eslint": "^9.0.0"
   },
   "peerDependencies": {

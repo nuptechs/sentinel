@@ -130,7 +130,7 @@ export function createApp(services, adapters = null) {
     allowedHeaders: ['Content-Type', 'Authorization', 'Mcp-Session-Id', 'Last-Event-ID', 'X-Request-Id', 'X-Sentinel-SDK', 'X-Sentinel-Key', 'X-Sentinel-Session', 'X-Sentinel-Correlation', 'X-Sentinel-Source'],
   }));
   app.use(compression());
-  app.use(express.json({ limit: '2mb' }));
+  app.use(express.json({ limit: '60mb' }));
   app.use(requestId);
 
   // ── Health (before auth — must be public) ───
