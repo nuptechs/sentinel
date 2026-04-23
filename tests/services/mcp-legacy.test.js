@@ -63,9 +63,9 @@ describe('MCPServer (legacy facade)', () => {
   // ── getToolDefinitions ────────────────────
 
   describe('getToolDefinitions', () => {
-    it('returns 11 tool definitions with JSON schema', () => {
+    it('returns 12 tool definitions with JSON schema', () => {
       const defs = mcp.getToolDefinitions();
-      assert.equal(defs.length, 11);
+      assert.equal(defs.length, 12);
       for (const def of defs) {
         assert.ok(def.name);
         assert.ok(def.description);
@@ -332,7 +332,7 @@ describe('MCPServer (legacy facade)', () => {
 
     it('handles tools/list', async () => {
       const result = await mcp.handleMessage({ id: 4, method: 'tools/list' });
-      assert.equal(result.result.tools.length, 11);
+      assert.equal(result.result.tools.length, 12);
     });
 
     it('handles tools/call → delegates to executeTool', async () => {

@@ -1,0 +1,114 @@
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: Sentinel Alerts
+    folder: Sentinel
+    interval: 1m
+    rules:
+      - uid: sentinel-high-error-rate
+        title: "Sentinel HTTP 5xx > 5%"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: "sum(rate(sentinel_http_requests_total{status_code=~\"5..\"}[5m])) / sum(rate(sentinel_http_requests_total[5m])) * 100"
+              intervalMs: 15000
+          - refId: C
+            datasourceUid: "-100"
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [5]
+        for: 2m
+        labels:
+          severity: critical
+          service: sentinel
+        annotations:
+          summary: "Sentinel error rate above 5% for 2m"
+
+      - uid: sentinel-high-latency
+        title: "Sentinel HTTP p95 > 2s"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: "histogram_quantile(0.95, sum by (le) (rate(sentinel_http_request_duration_seconds_bucket[5m])))"
+              intervalMs: 15000
+          - refId: C
+            datasourceUid: "-100"
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [2]
+        for: 3m
+        labels:
+          severity: warning
+          service: sentinel
+        annotations:
+          summary: "Sentinel p95 latency above 2s for 3m"
+
+      - uid: sentinel-diagnosis-failure-rate
+        title: "Sentinel diagnosis failure rate > 20%"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: "sum(rate(sentinel_diagnoses_total{outcome=~\"failed|ai_unavailable\"}[10m])) / clamp_min(sum(rate(sentinel_diagnoses_total[10m])), 0.0001) * 100"
+              intervalMs: 15000
+          - refId: C
+            datasourceUid: "-100"
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [20]
+        for: 5m
+        labels:
+          severity: warning
+          service: sentinel
+        annotations:
+          summary: "More than 20% of diagnose() calls failing (10m window)"
+
+      - uid: sentinel-auto-enrich-failure-rate
+        title: "Sentinel auto-enrich failure rate > 50%"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: "sum(rate(sentinel_auto_enrich_total{outcome=\"failed\"}[10m])) / clamp_min(sum(rate(sentinel_auto_enrich_total{outcome!=\"disabled\"}[10m])), 0.0001) * 100"
+              intervalMs: 15000
+          - refId: C
+            datasourceUid: "-100"
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [50]
+        for: 10m
+        labels:
+          severity: warning
+          service: sentinel
+        annotations:
+          summary: "Auto-enrich failing >50% when enabled (10m window)"

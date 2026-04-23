@@ -11,6 +11,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { LATEST_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
+import { registry as metricsRegistry } from '../observability/metrics.js';
 
 const SERVER_NAME = 'sentinel-mcp';
 const SERVER_VERSION = '0.2.0';
@@ -278,6 +279,35 @@ function buildToolRegistry(services) {
         }
         const events = await trace.collectLive(sessionId, { durationMs, limit });
         return { sessionId, durationMs, count: events.length, events };
+      },
+    },
+    {
+      name: 'get_metrics_snapshot',
+      title: 'Get Metrics Snapshot',
+      description: 'Return a snapshot of Sentinel\'s Prometheus metrics (counters, histograms, and default Node.js runtime gauges) from the in-process registry. Lets coding agents inspect live system health (request rate, diagnosis outcomes, auto-enrich health, etc.) without hitting the HTTP /metrics endpoint.',
+      inputSchema: {
+        format: z.enum(['json', 'text']).default('json').optional()
+          .describe('Output format: "json" (structured metrics) or "text" (raw Prometheus exposition). Default: json.'),
+        prefix: z.string().optional()
+          .describe('Optional metric-name prefix filter (e.g. "sentinel_http" to only include HTTP metrics).'),
+      },
+      execute: async ({ format = 'json', prefix } = {}) => {
+        if (format === 'text') {
+          const text = await metricsRegistry.metrics();
+          const filtered = prefix
+            ? text.split('\n').filter((line) =>
+              line.startsWith('#') ? line.includes(prefix) : line.startsWith(prefix),
+            ).join('\n')
+            : text;
+          return { payload: filtered };
+        }
+        const all = await metricsRegistry.getMetricsAsJSON();
+        const metrics = prefix ? all.filter((m) => m.name.startsWith(prefix)) : all;
+        return {
+          contentType: metricsRegistry.contentType,
+          count: metrics.length,
+          metrics,
+        };
       },
     },
   ];
