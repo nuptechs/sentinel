@@ -42,6 +42,32 @@ export class TracePort {
     throw new Error('TracePort.wrapPool() not implemented');
   }
 
+  /**
+   * Bootstrap a remote session on the backing probe (if any) so that
+   * later event ingests and queries line up on the same session id.
+   * Non-throwing: adapters return `{ ok: false }` when the remote is not
+   * configured or the call fails — Sentinel must still work end-to-end.
+   * @param {{id:string, projectId?:string, metadata?:object}} session
+   * @returns {Promise<{ok:boolean, remoteSessionId?:string, error?:string}>}
+   */
+  async ensureRemoteSession(_session) {
+    return { ok: false };
+  }
+
+  /**
+   * Subscribe to a realtime stream of trace events for a given Sentinel
+   * session. Adapters that can bridge a WebSocket (Debug Probe) forward
+   * each event to `listener`. Adapters without a live channel return a
+   * no-op unsubscribe function.
+   *
+   * @param {string} _sessionId — Sentinel session id (adapter maps to remote)
+   * @param {(event:object) => void} _listener
+   * @returns {Promise<() => void>} — unsubscribe function (idempotent)
+   */
+  async subscribe(_sessionId, _listener) {
+    return () => {};
+  }
+
   isConfigured() {
     return false;
   }

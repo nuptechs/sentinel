@@ -35,6 +35,10 @@ export class Finding {
    * @param {object[]} [props.media]            — [{ id, type: 'audio'|'video', mimeType, size, url }]
    * @param {object}  [props.diagnosis]         — AI diagnosis result
    * @param {object}  [props.correction]        — proposed code change
+   * @param {string}  [props.correlationId]        — cross-system request correlation ID (W3C parent-id / X-Request-Id)
+   * @param {string}  [props.debugProbeSessionId]  — Debug Probe remote session ID, when tracing is wired
+   * @param {string}  [props.manifestProjectId]    — Manifest analyzer project ID, for code-chain lookups
+   * @param {string}  [props.manifestRunId]        — Manifest analysis run ID used to resolve the code chain
    * @param {Date}    [props.createdAt]
    * @param {Date}    [props.updatedAt]
    */
@@ -58,6 +62,10 @@ export class Finding {
     this.media = props.media || [];
     this.diagnosis = props.diagnosis || null;
     this.correction = props.correction || null;
+    this.correlationId = props.correlationId || null;
+    this.debugProbeSessionId = props.debugProbeSessionId || null;
+    this.manifestProjectId = props.manifestProjectId || null;
+    this.manifestRunId = props.manifestRunId || null;
     this.createdAt = props.createdAt || new Date();
     this.updatedAt = props.updatedAt || new Date();
   }
@@ -134,6 +142,10 @@ export class Finding {
       media: this.media,
       diagnosis: this.diagnosis,
       correction: this.correction,
+      correlationId: this.correlationId,
+      debugProbeSessionId: this.debugProbeSessionId,
+      manifestProjectId: this.manifestProjectId,
+      manifestRunId: this.manifestRunId,
       createdAt: this.createdAt.toISOString(),
       updatedAt: this.updatedAt.toISOString(),
     };

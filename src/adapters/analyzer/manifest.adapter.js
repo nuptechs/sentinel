@@ -19,6 +19,7 @@ export class ManifestAnalyzerAdapter extends AnalyzerPort {
    * @param {number} [options.timeoutMs]
    * @param {string} [options.projectRoot]
    * @param {Record<string, string>} [options.projectRoots]
+   * @param {Record<string, number|string>} [options.projectIdMap] — slug → Manifest int id (Gap 8)
    */
   constructor({
     baseUrl,
@@ -26,6 +27,7 @@ export class ManifestAnalyzerAdapter extends AnalyzerPort {
     timeoutMs = 10_000,
     projectRoot = process.env.SENTINEL_PROJECT_ROOT || process.env.PROJECT_ROOT || null,
     projectRoots = null,
+    projectIdMap = null,
   } = {}) {
     super();
     this.baseUrl = baseUrl ? baseUrl.replace(/\/$/, '') : '';
@@ -33,6 +35,7 @@ export class ManifestAnalyzerAdapter extends AnalyzerPort {
     this.timeoutMs = timeoutMs;
     this.projectRoot = projectRoot || null;
     this.projectRoots = projectRoots || this._parseProjectRoots(process.env.SENTINEL_PROJECT_ROOTS || '');
+    this.projectIdMap = projectIdMap || this._parseProjectIdMap(process.env.MANIFEST_PROJECT_ID_MAP || '');
 
     // Circuit breaker: protects against Manifest API outages.
     // 4xx errors don't trip the breaker — those are our problem, not the API's.
@@ -99,7 +102,8 @@ export class ManifestAnalyzerAdapter extends AnalyzerPort {
   }
 
   async analyze(projectId) {
-    const response = await this._protectedFetch(`/api/projects/${projectId}/analyze`, {
+    const resolved = this._resolveManifestProjectId(projectId);
+    const response = await this._protectedFetch(`/api/projects/${encodeURIComponent(resolved)}/analyze`, {
       method: 'POST',
     });
     return response;
@@ -112,7 +116,33 @@ export class ManifestAnalyzerAdapter extends AnalyzerPort {
   // ── Private ───────────────────────────────
 
   async _fetchCatalogEntries(projectId) {
-    return this._protectedFetch(`/api/catalog-entries/${projectId}`);
+    const resolved = this._resolveManifestProjectId(projectId);
+    return this._protectedFetch(`/api/catalog-entries/${encodeURIComponent(resolved)}`);
+  }
+
+  /**
+   * Translate a Sentinel projectId (string slug) into the Manifest numeric
+   * projectId expected by `/api/catalog-entries/:projectId`, `/api/projects/:id/analyze`,
+   * etc. (Gap 8).
+   *
+   * Resolution order:
+   *   1. If `projectId` is already numeric (int or numeric string) → pass through
+   *   2. If `projectIdMap[slug]` is set → use mapped id
+   *   3. Otherwise pass through unchanged (legacy behaviour; Manifest will
+   *      typically respond 400 or empty, matching the pre-fix state)
+   */
+  _resolveManifestProjectId(projectId) {
+    if (projectId === null || projectId === undefined) return projectId;
+    const asString = String(projectId);
+
+    // Already numeric — nothing to translate.
+    if (/^\d+$/.test(asString)) return asString;
+
+    const mapped = this.projectIdMap?.[asString];
+    if (mapped !== undefined && mapped !== null && mapped !== '') {
+      return String(mapped);
+    }
+    return asString;
   }
 
   /**
@@ -252,6 +282,38 @@ export class ManifestAnalyzerAdapter extends AnalyzerPort {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         return parsed;
+      }
+    } catch {
+      // Fallback to key=value,key=value format
+    }
+
+    const entries = raw
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .map((item) => item.split('=').map((part) => part?.trim()));
+
+    return Object.fromEntries(entries.filter(([key, value]) => key && value));
+  }
+
+  /**
+   * Parse MANIFEST_PROJECT_ID_MAP env var (Gap 8). Supports JSON
+   * (`{"easynup-prod":1,"kan":2}`) or key=value CSV
+   * (`easynup-prod=1,kan=2`). Invalid input yields an empty map.
+   */
+  _parseProjectIdMap(raw) {
+    if (!raw) return {};
+
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const normalised = {};
+        for (const [key, value] of Object.entries(parsed)) {
+          if (key && value !== null && value !== undefined && value !== '') {
+            normalised[key] = String(value);
+          }
+        }
+        return normalised;
       }
     } catch {
       // Fallback to key=value,key=value format

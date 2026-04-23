@@ -63,9 +63,9 @@ describe('MCPServer (legacy facade)', () => {
   // ── getToolDefinitions ────────────────────
 
   describe('getToolDefinitions', () => {
-    it('returns 7 tool definitions with JSON schema', () => {
+    it('returns 10 tool definitions with JSON schema', () => {
       const defs = mcp.getToolDefinitions();
-      assert.equal(defs.length, 7);
+      assert.equal(defs.length, 10);
       for (const def of defs) {
         assert.ok(def.name);
         assert.ok(def.description);
@@ -148,6 +148,112 @@ describe('MCPServer (legacy facade)', () => {
       assert.ok(data.byType);
     });
 
+    // Gap 9 — new cross-system MCP tools
+    it('get_traces returns traces when trace adapter configured', async () => {
+      services.trace = {
+        isConfigured: () => true,
+        getTraces: async () => [{ correlationId: 'c1', payload: {} }],
+      };
+      mcp = new MCPServer({ services });
+      const result = await mcp.executeTool('get_traces', { sessionId: 's1' });
+      const data = JSON.parse(result.content[0].text);
+      assert.equal(data.count, 1);
+      assert.equal(data.sessionId, 's1');
+    });
+
+    it('get_traces returns isError when trace adapter unconfigured', async () => {
+      services.trace = { isConfigured: () => false, getTraces: async () => [] };
+      mcp = new MCPServer({ services });
+      const result = await mcp.executeTool('get_traces', { sessionId: 's1' });
+      assert.equal(result.isError, true);
+      const data = JSON.parse(result.content[0].text);
+      assert.ok(data.error.includes('No trace adapter'));
+    });
+
+    it('get_code_chain returns cached codeContext when present', async () => {
+      services.findings.get = mock.fn(async (id) => ({
+        id, codeContext: { controller: 'FooCtl', service: 'FooSvc' },
+      }));
+      mcp = new MCPServer({ services });
+      const result = await mcp.executeTool('get_code_chain', { findingId: 'f1' });
+      const data = JSON.parse(result.content[0].text);
+      assert.equal(data.source, 'cached');
+      assert.equal(data.codeContext.controller, 'FooCtl');
+    });
+
+    it('get_code_chain falls back to analyzer when no cached context', async () => {
+      services.findings.get = mock.fn(async (id) => ({
+        id,
+        projectId: 'proj-1',
+        manifestProjectId: 'mp-1',
+        codeContext: null,
+        backendContext: { traces: [{ request: { path: '/api/x', method: 'POST' } }] },
+      }));
+      services.analyzer = {
+        isConfigured: () => true,
+        resolveEndpoint: async (projectId, endpoint, method) => ({
+          projectId, endpoint, method, chain: ['Ctl', 'Svc'],
+        }),
+      };
+      mcp = new MCPServer({ services });
+      const result = await mcp.executeTool('get_code_chain', { findingId: 'f1' });
+      const data = JSON.parse(result.content[0].text);
+      assert.equal(data.source, 'analyzer');
+      assert.equal(data.projectId, 'mp-1');
+      assert.equal(data.endpoint, '/api/x');
+      assert.equal(data.method, 'POST');
+    });
+
+    it('get_code_chain isError when analyzer unconfigured and no cache', async () => {
+      services.findings.get = mock.fn(async (id) => ({ id, codeContext: null }));
+      services.analyzer = null;
+      mcp = new MCPServer({ services });
+      const result = await mcp.executeTool('get_code_chain', { findingId: 'f1' });
+      assert.equal(result.isError, true);
+    });
+
+    it('get_code_chain isError when endpoint cannot be derived', async () => {
+      services.findings.get = mock.fn(async (id) => ({
+        id, projectId: 'p', codeContext: null, backendContext: { traces: [] },
+      }));
+      services.analyzer = {
+        isConfigured: () => true,
+        resolveEndpoint: async () => ({}),
+      };
+      mcp = new MCPServer({ services });
+      const result = await mcp.executeTool('get_code_chain', { findingId: 'f1' });
+      assert.equal(result.isError, true);
+      const data = JSON.parse(result.content[0].text);
+      assert.ok(data.error.includes('Cannot infer endpoint'));
+    });
+
+    it('get_source_file returns source when analyzer configured', async () => {
+      services.analyzer = {
+        isConfigured: () => true,
+        getSourceFile: async () => 'class Foo {}',
+      };
+      mcp = new MCPServer({ services });
+      const result = await mcp.executeTool('get_source_file', { projectId: 'p', path: 'Foo.java' });
+      const data = JSON.parse(result.content[0].text);
+      assert.equal(data.source, 'class Foo {}');
+    });
+
+    it('get_source_file isError when analyzer unconfigured', async () => {
+      services.analyzer = { isConfigured: () => false, getSourceFile: async () => null };
+      mcp = new MCPServer({ services });
+      const result = await mcp.executeTool('get_source_file', { projectId: 'p', path: 'x.java' });
+      assert.equal(result.isError, true);
+    });
+
+    it('get_source_file isError when file not found', async () => {
+      services.analyzer = { isConfigured: () => true, getSourceFile: async () => null };
+      mcp = new MCPServer({ services });
+      const result = await mcp.executeTool('get_source_file', { projectId: 'p', path: 'x.java' });
+      assert.equal(result.isError, true);
+      const data = JSON.parse(result.content[0].text);
+      assert.ok(data.error.includes('not found'));
+    });
+
     it('returns error for unknown tool', async () => {
       const result = await mcp.executeTool('nonexistent', {});
       assert.equal(result.isError, true);
@@ -195,7 +301,7 @@ describe('MCPServer (legacy facade)', () => {
 
     it('handles tools/list', async () => {
       const result = await mcp.handleMessage({ id: 4, method: 'tools/list' });
-      assert.equal(result.result.tools.length, 7);
+      assert.equal(result.result.tools.length, 10);
     });
 
     it('handles tools/call → delegates to executeTool', async () => {

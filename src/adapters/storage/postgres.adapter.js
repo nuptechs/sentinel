@@ -142,8 +142,9 @@ export class PostgresStorageAdapter extends StoragePort {
        (id, session_id, project_id, source, type, severity, status,
         title, description, page_url, css_selector, screenshot_url,
         annotation, browser_context, backend_context, code_context,
-        diagnosis, correction, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+        diagnosis, correction, created_at, updated_at,
+        correlation_id, debug_probe_session_id, manifest_project_id, manifest_run_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
       [
         finding.id, finding.sessionId, finding.projectId,
         finding.source, finding.type, finding.severity, finding.status,
@@ -153,6 +154,10 @@ export class PostgresStorageAdapter extends StoragePort {
         this._json(finding.backendContext), this._json(finding.codeContext),
         this._json(finding.diagnosis), this._json(finding.correction),
         finding.createdAt, finding.updatedAt,
+        finding.correlationId || null,
+        finding.debugProbeSessionId || null,
+        finding.manifestProjectId || null,
+        finding.manifestRunId || null,
       ]
     );
     return finding;
@@ -371,6 +376,10 @@ export class PostgresStorageAdapter extends StoragePort {
       codeContext: row.code_context,
       diagnosis: row.diagnosis,
       correction: row.correction,
+      correlationId: row.correlation_id || null,
+      debugProbeSessionId: row.debug_probe_session_id || null,
+      manifestProjectId: row.manifest_project_id || null,
+      manifestRunId: row.manifest_run_id || null,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),
     });

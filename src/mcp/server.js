@@ -164,6 +164,99 @@ function buildToolRegistry(services) {
         return stats;
       },
     },
+    {
+      name: 'get_traces',
+      title: 'Get Backend Traces',
+      description: 'Retrieve backend HTTP + SQL traces for a QA session. Returns an array of correlated request/response/queries entries from Debug Probe (or the configured trace adapter). Use this to inspect what the backend did while the user reproduced the bug.',
+      inputSchema: {
+        sessionId: z.string().min(1).describe('The Sentinel session ID'),
+        since: z.number().int().optional().describe('Unix ms — only traces at/after this timestamp'),
+        until: z.number().int().optional().describe('Unix ms — only traces at/before this timestamp'),
+        limit: z.number().int().positive().max(500).default(100).describe('Max traces (default 100)'),
+      },
+      execute: async ({ sessionId, since, until, limit = 100 }) => {
+        const trace = services.trace;
+        if (!trace || typeof trace.getTraces !== 'function' || !trace.isConfigured?.()) {
+          return {
+            payload: { error: 'No trace adapter configured', traces: [] },
+            isError: true,
+          };
+        }
+        const traces = await trace.getTraces(sessionId, { since, until, limit });
+        return { sessionId, count: traces.length, traces };
+      },
+    },
+    {
+      name: 'get_code_chain',
+      title: 'Get Code Chain',
+      description: 'Resolve the full backend call chain (controller → service → repository) for a finding. Uses the finding\'s existing codeContext when available, otherwise falls back to the analyzer for the page URL.',
+      inputSchema: {
+        findingId: z.string().min(1).describe('The finding UUID'),
+      },
+      execute: async ({ findingId }) => {
+        const finding = await services.findings.get(findingId);
+        if (finding.codeContext) {
+          return {
+            findingId: finding.id,
+            source: 'cached',
+            codeContext: finding.codeContext,
+          };
+        }
+
+        const analyzer = services.analyzer;
+        if (!analyzer || typeof analyzer.resolveEndpoint !== 'function' || !analyzer.isConfigured?.()) {
+          return {
+            payload: { error: 'No analyzer configured and no cached codeContext', findingId },
+            isError: true,
+          };
+        }
+
+        const projectId = finding.manifestProjectId || finding.projectId;
+        // Best-effort endpoint derivation from the first backend trace on the finding
+        const endpoint = finding.backendContext?.traces?.[0]?.request?.path
+          || finding.backendContext?.traces?.[0]?.path
+          || null;
+        const method = finding.backendContext?.traces?.[0]?.request?.method
+          || finding.backendContext?.traces?.[0]?.method
+          || 'GET';
+
+        if (!endpoint) {
+          return {
+            payload: { error: 'Cannot infer endpoint for finding (no backendContext.traces)', findingId },
+            isError: true,
+          };
+        }
+
+        const chain = await analyzer.resolveEndpoint(projectId, endpoint, method);
+        return { findingId, source: 'analyzer', projectId, endpoint, method, codeContext: chain };
+      },
+    },
+    {
+      name: 'get_source_file',
+      title: 'Get Source File',
+      description: 'Fetch the contents of a project source file via the analyzer (Manifest). Used to inspect code implicated in a diagnosis or correction.',
+      inputSchema: {
+        projectId: z.string().min(1).describe('The analyzer project ID (typically finding.manifestProjectId)'),
+        path: z.string().min(1).describe('Project-relative file path'),
+      },
+      execute: async ({ projectId, path }) => {
+        const analyzer = services.analyzer;
+        if (!analyzer || typeof analyzer.getSourceFile !== 'function' || !analyzer.isConfigured?.()) {
+          return {
+            payload: { error: 'No analyzer configured' },
+            isError: true,
+          };
+        }
+        const source = await analyzer.getSourceFile(projectId, path);
+        if (source == null) {
+          return {
+            payload: { error: `Source file not found: ${path}`, projectId, path },
+            isError: true,
+          };
+        }
+        return { projectId, path, source };
+      },
+    },
   ];
 }
 

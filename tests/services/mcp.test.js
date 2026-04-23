@@ -137,7 +137,7 @@ describe('createSentinelMCP', () => {
     assert.equal(initializeResult.result.protocolVersion, '2024-11-05');
   });
 
-  it('lists all 7 tools via the SDK transport', async () => {
+  it('lists all 10 tools via the SDK transport', async () => {
     const result = await sendMessage(transport, {
       jsonrpc: '2.0',
       id: 2,
@@ -145,7 +145,7 @@ describe('createSentinelMCP', () => {
     });
 
     assert.ok(result.result.tools);
-    assert.equal(result.result.tools.length, 7);
+    assert.equal(result.result.tools.length, 10);
 
     const names = result.result.tools.map((tool) => tool.name);
     assert.ok(names.includes('list_findings'));
@@ -155,6 +155,9 @@ describe('createSentinelMCP', () => {
     assert.ok(names.includes('push_to_tracker'));
     assert.ok(names.includes('mark_fix_applied'));
     assert.ok(names.includes('get_project_stats'));
+    assert.ok(names.includes('get_traces'));
+    assert.ok(names.includes('get_code_chain'));
+    assert.ok(names.includes('get_source_file'));
   });
 
   it('executes list_findings', async () => {

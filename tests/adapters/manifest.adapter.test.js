@@ -470,3 +470,69 @@ describe('ManifestAnalyzerAdapter._getCandidatePaths', () => {
     }
   });
 });
+
+// ── Gap 8: projectId slug → int mapping ──────
+
+describe('ManifestAnalyzerAdapter projectId mapping (Gap 8)', () => {
+  beforeEach(setupFetch);
+  afterEach(teardownFetch);
+
+  it('translates slug via projectIdMap before fetching catalog', async () => {
+    queueJson([]);
+    const a = new ManifestAnalyzerAdapter({
+      baseUrl: 'http://manifest',
+      projectIdMap: { 'easynup-prod': 1, 'kan': 2 },
+    });
+    await a.resolveEndpoint('easynup-prod', '/api/x', 'GET');
+    assert.ok(_calls[0].url.endsWith('/api/catalog-entries/1'));
+  });
+
+  it('passes numeric projectId through unchanged', async () => {
+    queueJson([]);
+    const a = new ManifestAnalyzerAdapter({
+      baseUrl: 'http://manifest',
+      projectIdMap: { 'easynup-prod': 1 },
+    });
+    await a.resolveEndpoint('42', '/api/x', 'GET');
+    assert.ok(_calls[0].url.endsWith('/api/catalog-entries/42'));
+  });
+
+  it('leaves unmapped slugs untouched (legacy behaviour)', async () => {
+    queueJson([]);
+    const a = new ManifestAnalyzerAdapter({
+      baseUrl: 'http://manifest',
+      projectIdMap: { 'easynup-prod': 1 },
+    });
+    await a.resolveEndpoint('unknown-slug', '/api/x', 'GET');
+    assert.ok(_calls[0].url.endsWith('/api/catalog-entries/unknown-slug'));
+  });
+
+  it('_parseProjectIdMap accepts JSON format', () => {
+    const a = new ManifestAnalyzerAdapter({ baseUrl: 'http://x' });
+    const map = a._parseProjectIdMap('{"easynup-prod":1,"kan":2}');
+    assert.deepEqual(map, { 'easynup-prod': '1', 'kan': '2' });
+  });
+
+  it('_parseProjectIdMap accepts key=value CSV format', () => {
+    const a = new ManifestAnalyzerAdapter({ baseUrl: 'http://x' });
+    const map = a._parseProjectIdMap('easynup-prod=1,kan=2');
+    assert.deepEqual(map, { 'easynup-prod': '1', 'kan': '2' });
+  });
+
+  it('_parseProjectIdMap returns empty map on invalid input', () => {
+    const a = new ManifestAnalyzerAdapter({ baseUrl: 'http://x' });
+    assert.deepEqual(a._parseProjectIdMap(''), {});
+    assert.deepEqual(a._parseProjectIdMap('not=valid=at=all,,'), { 'not': 'valid' });
+  });
+
+  it('analyze() uses translated projectId', async () => {
+    queueJson({ ok: true });
+    const a = new ManifestAnalyzerAdapter({
+      baseUrl: 'http://manifest',
+      projectIdMap: { 'easynup-prod': 7 },
+    });
+    await a.analyze('easynup-prod');
+    assert.ok(_calls[0].url.includes('/api/projects/7/analyze'));
+    assert.equal(_calls[0].opts.method, 'POST');
+  });
+});

@@ -67,6 +67,46 @@ describe('FindingService', () => {
         (err) => err instanceof ValidationError
       );
     });
+
+    // Gap 11 — external system ids
+    it('persists explicit external ids when provided', async () => {
+      await storage.createSession({
+        id: 'sess-1',
+        projectId: 'proj-1',
+        status: 'active',
+        metadata: {},
+      });
+      const f = await service.create({
+        ...VALID_FINDING,
+        correlationId: 'corr-xyz',
+        debugProbeSessionId: 'dp-111',
+        manifestProjectId: 'mp-1',
+        manifestRunId: 'run-1',
+      });
+      assert.equal(f.correlationId, 'corr-xyz');
+      assert.equal(f.debugProbeSessionId, 'dp-111');
+      assert.equal(f.manifestProjectId, 'mp-1');
+      assert.equal(f.manifestRunId, 'run-1');
+    });
+
+    it('backfills debugProbeSessionId from session.metadata when omitted', async () => {
+      await storage.createSession({
+        id: 'sess-1',
+        projectId: 'proj-1',
+        status: 'active',
+        metadata: { debugProbeSessionId: 'dp-from-session' },
+      });
+      const f = await service.create(VALID_FINDING);
+      assert.equal(f.debugProbeSessionId, 'dp-from-session');
+    });
+
+    it('does not fail when session lookup for backfill throws', async () => {
+      const brokenStorage = new MemoryStorageAdapter();
+      brokenStorage.getSession = async () => { throw new Error('db down'); };
+      const svc = new FindingService({ storage: brokenStorage });
+      const f = await svc.create(VALID_FINDING);
+      assert.equal(f.debugProbeSessionId, null);
+    });
   });
 
   describe('get', () => {

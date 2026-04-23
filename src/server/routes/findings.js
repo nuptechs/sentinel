@@ -27,7 +27,8 @@ export function createFindingRoutes(services) {
   // POST /api/findings — Create a finding (from annotation or auto-detect)
   router.post('/', asyncHandler(async (req, res) => {
     const { sessionId, projectId, annotation, browserContext, type, severity, source,
-            title, description, pageUrl, cssSelector, screenshotUrl } = req.body;
+            title, description, pageUrl, cssSelector, screenshotUrl,
+            correlationId, debugProbeSessionId, manifestProjectId, manifestRunId } = req.body;
 
     if (!sessionId?.trim()) throw new ValidationError('sessionId is required');
     if (!projectId?.trim()) throw new ValidationError('projectId is required');
@@ -48,6 +49,10 @@ export function createFindingRoutes(services) {
       type: type || 'bug',
       severity: severity || 'medium',
       source: source || 'manual',
+      correlationId: correlationId || annotation?.correlationId || null,
+      debugProbeSessionId: debugProbeSessionId || null,
+      manifestProjectId: manifestProjectId || null,
+      manifestRunId: manifestRunId || null,
     });
 
     queueMicrotask(() => {

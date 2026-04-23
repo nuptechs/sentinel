@@ -12,9 +12,11 @@ export class SessionService {
   /**
    * @param {object} ports
    * @param {import('../ports/storage.port.js').StoragePort} ports.storage
+   * @param {import('../ports/trace.port.js').TracePort} [ports.trace]
    */
-  constructor({ storage }) {
+  constructor({ storage, trace = null }) {
     this.storage = storage;
+    this.trace = trace;
   }
 
   async create({ projectId, userId, userAgent, pageUrl, metadata }) {
@@ -22,6 +24,25 @@ export class SessionService {
 
     const session = new Session({ projectId, userId, userAgent, pageUrl, metadata });
     await this.storage.createSession(session);
+
+    // Best-effort mirror on the remote trace probe so later getTraces()
+    // lands on an existing session id. Never block or fail session
+    // creation on a downstream probe hiccup.
+    if (this.trace?.ensureRemoteSession) {
+      try {
+        const res = await this.trace.ensureRemoteSession(session);
+        if (res?.ok && res.remoteSessionId) {
+          session.metadata = {
+            ...(session.metadata || {}),
+            debugProbeSessionId: res.remoteSessionId,
+          };
+          await this.storage.updateSession(session);
+        }
+      } catch {
+        // swallow — TracePort contract is non-throwing, but guard anyway
+      }
+    }
+
     return session;
   }
 

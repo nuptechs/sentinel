@@ -53,6 +53,12 @@ export class DebugProbeTraceAdapter extends TracePort {
     // Secondary index: Map<sessionId, Set<correlationId>>
     this.sessionIndex = new Map();
 
+    // Sentinel session id → Debug Probe remote session id.
+    // Populated by ensureRemoteSession(); consumed by _forwardToRemote()
+    // so trace entries captured by the middleware can be pushed to the
+    // correct remote session.
+    this._sessionMap = new Map();
+
     // Circuit breaker for remote Debug Probe API
     this._remoteBreaker = new CircuitBreaker({
       name: 'debugprobe-remote',
@@ -176,9 +182,15 @@ export class DebugProbeTraceAdapter extends TracePort {
         return next();
       }
 
-      // Resolve trace & correlation identifiers
+      // Resolve trace & correlation identifiers.
+      // Accepted aliases (in priority order):
+      //   1. X-Sentinel-Correlation  — native Sentinel header
+      //   2. X-Probe-Correlation-Id  — Debug Probe native header (Gap 7)
+      //   3. X-Request-Id            — common industry header
+      //   4. traceparent parent-id   — W3C fallback
       const traceCtx = createTraceContext(req.get('traceparent'));
       const correlationId = req.get('X-Sentinel-Correlation')
+        || req.get('X-Probe-Correlation-Id')
         || req.get('X-Request-Id')
         || traceCtx.parentId;
 
@@ -209,9 +221,12 @@ export class DebugProbeTraceAdapter extends TracePort {
       req._sentinelCorrelation = correlationId;
       req._sentinelTraceEntry = entry;
 
-      // Set W3C traceparent on the response for downstream propagation
+      // Set W3C traceparent on the response for downstream propagation,
+      // plus the cross-system correlation aliases (Gap 7).
       if (typeof res.setHeader === 'function') {
         res.setHeader('traceparent', formatTraceparent(traceCtx));
+        res.setHeader('X-Sentinel-Correlation', correlationId);
+        res.setHeader('X-Probe-Correlation-Id', correlationId);
       }
 
       // Capture response on finish
@@ -351,33 +366,53 @@ export class DebugProbeTraceAdapter extends TracePort {
       const entry = grouped.get(cid);
       entry.createdAt = Math.min(entry.createdAt, this._toTimestamp(event?.timestamp) || entry.createdAt);
 
+      // Debug Probe emits fields at the top level of the event; older
+      // payload shapes placed them under `.data` / `.payload`. Read from
+      // either location so both contracts compose.
       const data = event?.data || event?.payload || {};
-      switch (event?.type) {
+      const pick = (key) => data[key] ?? event?.[key];
+
+      // Event type normalization — Debug Probe actually emits:
+      //   source:'network' type:'request' | 'response'
+      //   source:'sdk'     type:'request-start' | 'request-end' | 'db-query'
+      // Legacy/expected names also accepted: http-request, http-response.
+      const rawType = event?.type;
+      const source = event?.source;
+      const normalizedType =
+        rawType === 'http-request' || rawType === 'request-start' || (source === 'network' && rawType === 'request')
+          ? 'http-request'
+          : rawType === 'http-response' || rawType === 'request-end' || (source === 'network' && rawType === 'response')
+            ? 'http-response'
+            : rawType === 'db-query'
+              ? 'db-query'
+              : null;
+
+      switch (normalizedType) {
         case 'http-request':
           entry.request = {
-            method: data.method || null,
-            path: data.path || data.url || null,
-            url: data.url || null,
-            headers: this._sanitizeHeaders(data.headers),
-            query: data.query || null,
-            body: this._truncateBody(data.body),
-            ip: data.ip || null,
+            method: pick('method') || null,
+            path: pick('path') || pick('url') || null,
+            url: pick('url') || null,
+            headers: this._sanitizeHeaders(pick('headers')),
+            query: pick('query') || null,
+            body: this._truncateBody(pick('body')),
+            ip: pick('ip') || null,
           };
           break;
         case 'http-response':
           entry.response = {
-            statusCode: data.statusCode || null,
-            headers: this._sanitizeHeaders(data.headers),
-            durationMs: data.durationMs || null,
+            statusCode: pick('statusCode') ?? pick('status') ?? null,
+            headers: this._sanitizeHeaders(pick('headers')),
+            durationMs: pick('durationMs') ?? pick('duration') ?? null,
           };
           break;
         case 'db-query':
           entry.queries.push({
-            sql: data.query || data.sql || null,
-            params: this._sanitizeParams(data.params),
-            durationMs: data.durationMs || null,
-            rowCount: data.rowCount ?? null,
-            error: data.error || null,
+            sql: pick('query') || pick('sql') || null,
+            params: this._sanitizeParams(pick('params')),
+            durationMs: pick('durationMs') ?? pick('duration') ?? null,
+            rowCount: pick('rowCount') ?? null,
+            error: pick('error') || null,
           });
           break;
         default:
@@ -391,10 +426,181 @@ export class DebugProbeTraceAdapter extends TracePort {
       .slice(0, limit);
   }
 
-  async _fetchJSON(path) {
+  /**
+   * Mirror-create the Sentinel session on the remote Debug Probe so that
+   * subsequent ingests and event queries key off the same session id.
+   * Debug Probe's POST /api/sessions currently uses `.strict()` on
+   * {name, config, tags}. We stuff Sentinel's session id into `name`
+   * (so it's retrievable) and pack projectId/metadata into `tags` as
+   * prefixed strings, staying within the accepted schema.
+   *
+   * Non-throwing — every failure is captured into the return envelope.
+   */
+  async ensureRemoteSession(session) {
+    if (!this.baseUrl || !session?.id) return { ok: false };
+
+    const tags = [];
+    if (session.projectId) tags.push(`sentinel:project:${session.projectId}`);
+    tags.push(`sentinel:session:${session.id}`);
+    if (session.metadata?.source) tags.push(`sentinel:source:${session.metadata.source}`);
+
+    // Gap 4 — Debug Probe now accepts structured integration fields. We
+    // populate both the legacy tag-prefixed format and the new first-class
+    // fields so older probes still receive the info via tags.
+    const body = {
+      name: `sentinel-${session.id}`,
+      tags,
+      externalSessionId: session.id,
+    };
+    if (session.projectId) body.projectId = session.projectId;
+    if (session.metadata && typeof session.metadata === 'object') {
+      const flat = {};
+      for (const [k, v] of Object.entries(session.metadata)) {
+        if (v !== null && v !== undefined) flat[k] = String(v);
+      }
+      if (Object.keys(flat).length > 0) body.metadata = flat;
+    }
+
+    try {
+      const remote = await this._remoteBreaker.fire(
+        () => this._fetchJSON('/api/sessions', { method: 'POST', body }),
+      );
+      const remoteSessionId = remote?.id || remote?.data?.id || null;
+      if (remoteSessionId) {
+        this._sessionMap.set(session.id, remoteSessionId);
+      }
+      return { ok: true, remoteSessionId };
+    } catch (err) {
+      // Gap 4 compatibility — older Debug Probe instances still use
+      // `.strict()` on the create-session schema and will reject the new
+      // `projectId`/`metadata`/`externalSessionId` fields with 400. Retry
+      // once with the legacy tags-only payload so rollouts don't break.
+      if (err?.status === 400 && (body.projectId || body.metadata || body.externalSessionId)) {
+        try {
+          const legacyBody = { name: body.name, tags: body.tags };
+          const remote = await this._remoteBreaker.fire(
+            () => this._fetchJSON('/api/sessions', { method: 'POST', body: legacyBody }),
+          );
+          const remoteSessionId = remote?.id || remote?.data?.id || null;
+          if (remoteSessionId) this._sessionMap.set(session.id, remoteSessionId);
+          return { ok: true, remoteSessionId, degraded: 'legacy-schema' };
+        } catch (fallbackErr) {
+          if (!fallbackErr?.isCircuitOpen) {
+            console.warn(`[Sentinel] Debug Probe ensureRemoteSession fallback failed: ${fallbackErr.message}`);
+          }
+          return { ok: false, error: fallbackErr.message };
+        }
+      }
+      if (!err?.isCircuitOpen) {
+        console.warn(`[Sentinel] Debug Probe ensureRemoteSession failed: ${err.message}`);
+      }
+      return { ok: false, error: err.message };
+    }
+  }
+
+  /**
+   * Gap 10 — bridge Debug Probe's WebSocket so subscribers receive realtime
+   * events without polling. Non-throwing: when the remote is unconfigured,
+   * unknown, or the circuit breaker is open, returns a no-op unsubscribe.
+   *
+   * @param {string} sessionId — Sentinel session id
+   * @param {(event:object) => void} listener
+   * @returns {Promise<() => void>} unsubscribe function
+   */
+  async subscribe(sessionId, listener) {
+    if (typeof listener !== 'function') return () => {};
+    if (!this.baseUrl || !sessionId) return () => {};
+    if (this._remoteBreaker?.isOpen?.()) return () => {};
+
+    const remoteSessionId = this._sessionMap.get(sessionId) || sessionId;
+    const wsUrl = this.baseUrl.replace(/^http/i, 'ws');
+    const urlWithAuth = this.apiKey
+      ? `${wsUrl}/?token=${encodeURIComponent(this.apiKey)}`
+      : `${wsUrl}/`;
+
+    let closed = false;
+    let ws = null;
+    let retryTimer = null;
+    let attempt = 0;
+
+    const connect = async () => {
+      if (closed) return;
+      const { WebSocket } = await import('ws');
+      try {
+        ws = new WebSocket(urlWithAuth, {
+          headers: this.apiKey ? { 'X-API-Key': this.apiKey } : {},
+          handshakeTimeout: this.timeoutMs,
+        });
+      } catch (err) {
+        console.warn(`[Sentinel] Debug Probe subscribe: failed to open socket: ${err.message}`);
+        scheduleRetry();
+        return;
+      }
+
+      ws.on('open', () => {
+        attempt = 0;
+        try {
+          ws.send(JSON.stringify({ type: 'subscribe', sessionId: remoteSessionId }));
+        } catch { /* ignore — will retry on reconnect */ }
+      });
+
+      ws.on('message', (raw) => {
+        if (closed) return;
+        try {
+          const msg = JSON.parse(raw.toString());
+          if (msg?.type === 'event' && msg.event) {
+            listener(msg.event);
+          }
+        } catch { /* malformed frame — skip */ }
+      });
+
+      ws.on('error', (err) => {
+        if (!closed) {
+          console.warn(`[Sentinel] Debug Probe subscribe error: ${err.message}`);
+        }
+      });
+
+      ws.on('close', () => {
+        if (!closed) scheduleRetry();
+      });
+    };
+
+    const scheduleRetry = () => {
+      if (closed) return;
+      attempt += 1;
+      const delay = Math.min(30_000, 500 * 2 ** Math.min(attempt, 6));
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        connect().catch(() => { /* handled below */ });
+      }, delay);
+      // Allow process to exit if retry is the only pending timer
+      if (typeof retryTimer?.unref === 'function') retryTimer.unref();
+    };
+
+    connect().catch((err) => {
+      console.warn(`[Sentinel] Debug Probe subscribe: ${err.message}`);
+    });
+
+    return () => {
+      if (closed) return;
+      closed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      try {
+        if (ws && ws.readyState <= 1 /* CONNECTING or OPEN */) ws.close();
+      } catch { /* ignore */ }
+    };
+  }
+
+  async _fetchJSON(path, { method = 'GET', body = null } = {}) {
     const headers = { Accept: 'application/json' };
     if (this.apiKey) {
+      // Debug Probe server expects X-API-Key. We also send Authorization:
+      // Bearer for backward compatibility with legacy/JWT-protected probes.
+      headers['X-API-Key'] = this.apiKey;
       headers.Authorization = `Bearer ${this.apiKey}`;
+    }
+    if (body != null) {
+      headers['Content-Type'] = 'application/json';
     }
 
     const controller = new AbortController();
@@ -402,7 +608,9 @@ export class DebugProbeTraceAdapter extends TracePort {
 
     try {
       const response = await fetch(`${this.baseUrl}${path}`, {
+        method,
         headers,
+        body: body != null ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
 
@@ -438,10 +646,94 @@ export class DebugProbeTraceAdapter extends TracePort {
       });
     }
 
+    // Fire-and-forget forward to remote Debug Probe so traces captured
+    // locally via the Express middleware are also visible on the central
+    // probe. Only fires when we know the remote session id (populated by
+    // ensureRemoteSession) and a baseUrl is configured. Never throws.
+    if (this.baseUrl && entry.sessionId && this._sessionMap.has(entry.sessionId)) {
+      this._forwardToRemote(entry).catch(() => { /* silent */ });
+    }
+
     // LRU eviction — remove oldest when over capacity
     if (this.traces.size > this.maxTraces) {
       const oldestKey = this.traces.keys().next().value;
       this._evict(oldestKey);
+    }
+  }
+
+  /**
+   * Transform a local TraceEntry into Debug Probe events and POST them
+   * as a single batch. Non-blocking, failures are swallowed.
+   *
+   * Emits three flavors of events (schema required fields: id, sessionId,
+   * timestamp, source):
+   *   - source='sdk', type='request-start' — request metadata
+   *   - source='sdk', type='request-end'   — response metadata
+   *   - source='sdk', type='db-query'      — one per SQL query
+   */
+  async _forwardToRemote(entry) {
+    const remoteSessionId = this._sessionMap.get(entry.sessionId);
+    if (!remoteSessionId) return;
+
+    const base = {
+      sessionId: remoteSessionId,
+      source: 'sdk',
+      correlationId: entry.correlationId,
+    };
+    const events = [];
+
+    if (entry.request) {
+      events.push({
+        ...base,
+        id: `${entry.correlationId}:req`,
+        timestamp: entry.createdAt || Date.now(),
+        type: 'request-start',
+        method: entry.request.method,
+        url: entry.request.url || entry.request.path,
+        path: entry.request.path,
+        ip: entry.request.ip,
+      });
+    }
+    if (entry.response) {
+      const reqStart = entry.createdAt || Date.now();
+      events.push({
+        ...base,
+        id: `${entry.correlationId}:res`,
+        timestamp: reqStart + (entry.response.durationMs || 0),
+        type: 'request-end',
+        statusCode: entry.response.statusCode,
+        durationMs: entry.response.durationMs,
+      });
+    }
+    if (Array.isArray(entry.queries)) {
+      for (let i = 0; i < entry.queries.length; i++) {
+        const q = entry.queries[i];
+        events.push({
+          ...base,
+          id: `${entry.correlationId}:q${i}`,
+          timestamp: (entry.createdAt || Date.now()) + i,
+          type: 'db-query',
+          query: q.sql,
+          durationMs: q.durationMs,
+          rowCount: q.rowCount,
+          error: q.error || undefined,
+        });
+      }
+    }
+
+    if (events.length === 0) return;
+
+    try {
+      await this._remoteBreaker.fire(
+        () => this._fetchJSON(
+          `/api/sessions/${encodeURIComponent(remoteSessionId)}/events`,
+          { method: 'POST', body: { events } },
+        ),
+      );
+    } catch (err) {
+      if (!err?.isCircuitOpen) {
+        console.warn(`[Sentinel] Debug Probe forward failed: ${err.message}`);
+      }
     }
   }
 

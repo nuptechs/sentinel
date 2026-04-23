@@ -103,11 +103,22 @@ const MIGRATIONS = [
   },
 
   // ── Future migrations go here ─────────────
-  // {
-  //   version: 2,
-  //   name: 'add_finding_tags',
-  //   sql: `ALTER TABLE sentinel_findings ADD COLUMN tags TEXT[] DEFAULT '{}';`,
-  // },
+  {
+    version: 2,
+    name: 'add_finding_external_ids',
+    sql: `
+      ALTER TABLE sentinel_findings
+        ADD COLUMN IF NOT EXISTS correlation_id          TEXT,
+        ADD COLUMN IF NOT EXISTS debug_probe_session_id  TEXT,
+        ADD COLUMN IF NOT EXISTS manifest_project_id     TEXT,
+        ADD COLUMN IF NOT EXISTS manifest_run_id         TEXT;
+
+      CREATE INDEX IF NOT EXISTS idx_sentinel_findings_correlation
+        ON sentinel_findings (correlation_id) WHERE correlation_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_sentinel_findings_probe_session
+        ON sentinel_findings (debug_probe_session_id) WHERE debug_probe_session_id IS NOT NULL;
+    `,
+  },
 ];
 
 /**

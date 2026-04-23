@@ -10,5 +10,6 @@ export class NoopTraceAdapter extends TracePort {
   async getTraceByCorrelation() { return null; }
   createMiddleware() { return (_req, _res, next) => next(); }
   wrapPool(pool) { return pool; }
+  async ensureRemoteSession() { return { ok: false }; }
   isConfigured() { return false; }
 }

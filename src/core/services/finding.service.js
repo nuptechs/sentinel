@@ -20,6 +20,7 @@ export class FindingService {
     sessionId, projectId, source, type, severity,
     title, description, pageUrl, cssSelector,
     screenshotUrl, annotation, browserContext,
+    correlationId, debugProbeSessionId, manifestProjectId, manifestRunId,
   }) {
     if (!sessionId) throw new ValidationError('sessionId is required');
     if (!projectId) throw new ValidationError('projectId is required');
@@ -27,10 +28,28 @@ export class FindingService {
     if (!source) throw new ValidationError('source is required');
     if (!type) throw new ValidationError('type is required');
 
+    // Backfill debugProbeSessionId from session.metadata when not provided.
+    // SessionService stores the remote probe session id there during startSession.
+    let resolvedDebugProbeSessionId = debugProbeSessionId || null;
+    if (!resolvedDebugProbeSessionId) {
+      try {
+        const session = await this.storage.getSession(sessionId);
+        if (session?.metadata?.debugProbeSessionId) {
+          resolvedDebugProbeSessionId = session.metadata.debugProbeSessionId;
+        }
+      } catch {
+        // non-fatal — proceed without backfill
+      }
+    }
+
     const finding = new Finding({
       sessionId, projectId, source, type, severity,
       title, description, pageUrl, cssSelector,
       screenshotUrl, annotation, browserContext,
+      correlationId: correlationId || null,
+      debugProbeSessionId: resolvedDebugProbeSessionId,
+      manifestProjectId: manifestProjectId || null,
+      manifestRunId: manifestRunId || null,
     });
 
     await this.storage.createFinding(finding);

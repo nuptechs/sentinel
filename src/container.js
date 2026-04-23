@@ -98,7 +98,7 @@ async function buildAdapters() {
 
 function buildServices(adapters) {
   return {
-    sessions: new SessionService({ storage: adapters.storage }),
+    sessions: new SessionService({ storage: adapters.storage, trace: adapters.trace }),
     findings: new FindingService({ storage: adapters.storage }),
     diagnosis: new DiagnosisService({
       storage: adapters.storage,
@@ -119,6 +119,11 @@ function buildServices(adapters) {
       issueTracker: adapters.issueTracker,
       notification: adapters.notification,
     }),
+    // Exposed adapters for MCP tool handlers (Gap 9).
+    // These are read-only references — business logic must still go
+    // through the service layer.
+    trace: adapters.trace,
+    analyzer: adapters.analyzer,
   };
 }
 
@@ -189,6 +194,8 @@ function buildAnalyzer() {
     return new ManifestAnalyzerAdapter({
       baseUrl: url,
       apiKey: process.env.MANIFEST_API_KEY,
+      // MANIFEST_PROJECT_ID_MAP is consumed inside the adapter constructor
+      // (Gap 8 — slug→int translation for Manifest's int-based projectId).
     });
   }
   return new NoopAnalyzerAdapter();
