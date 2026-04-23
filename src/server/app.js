@@ -19,6 +19,7 @@ import { createSessionRoutes } from './routes/sessions.js';
 import { createFindingRoutes } from './routes/findings.js';
 import { createProjectRoutes } from './routes/projects.js';
 import { createSentinelMCP } from '../mcp/server.js';
+import { metricsMiddleware, metricsEndpoint } from '../observability/prometheus-middleware.js';
 
 function sendMcpError(res, status, message, code = -32000) {
   res.status(status).json({
@@ -132,6 +133,10 @@ export function createApp(services, adapters = null) {
   app.use(compression());
   app.use(express.json({ limit: '60mb' }));
   app.use(requestId);
+  app.use(metricsMiddleware);
+
+  // ── Prometheus metrics (public, unauthenticated — workspace convention) ──
+  app.get('/metrics', metricsEndpoint);
 
   // ── Health (before auth — must be public) ───
 

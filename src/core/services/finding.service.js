@@ -6,6 +6,7 @@
 
 import { Finding } from '../domain/finding.js';
 import { ValidationError, NotFoundError } from '../errors.js';
+import { findingsCreatedTotal } from '../../observability/metrics.js';
 
 export class FindingService {
   /**
@@ -53,6 +54,7 @@ export class FindingService {
     });
 
     await this.storage.createFinding(finding);
+    findingsCreatedTotal.inc({ source: String(source), type: String(type) });
     return finding;
   }
 

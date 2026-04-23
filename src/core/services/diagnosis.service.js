@@ -5,6 +5,18 @@
 // ─────────────────────────────────────────────
 
 import { NotFoundError, IntegrationError } from '../errors.js';
+import {
+  diagnosesTotal,
+  diagnosisDuration,
+  enrichLiveTotal,
+  enrichLiveEventsCollected,
+  autoEnrichTotal,
+} from '../../observability/metrics.js';
+
+function parsePositiveInt(value, fallback) {
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
 
 export class DiagnosisService {
   /**
@@ -31,16 +43,46 @@ export class DiagnosisService {
    * 4. Notify
    */
   async diagnose(findingId) {
-    const finding = await this.storage.getFinding(findingId);
-    if (!finding) throw new NotFoundError(`Finding ${findingId} not found`);
+    const startNs = process.hrtime.bigint();
+    let outcome = 'success';
+    try {
+      const finding = await this.storage.getFinding(findingId);
+      if (!finding) throw new NotFoundError(`Finding ${findingId} not found`);
 
-    // Step 1: Enrich with backend traces
+      // Step 0 (opt-in): Auto-enrich with live traces before static enrichment.
+      // Controlled by SENTINEL_AUTO_ENRICH=true. Window defaults to 1500ms.
+      if (process.env.SENTINEL_AUTO_ENRICH === 'true') {
+        if (this.trace && typeof this.trace.collectLive === 'function' && this.trace.isConfigured?.()) {
+          const durationMs = parsePositiveInt(process.env.SENTINEL_AUTO_ENRICH_DURATION_MS, 1500);
+          const limit = parsePositiveInt(process.env.SENTINEL_AUTO_ENRICH_LIMIT, 50);
+          try {
+            const events = await this.trace.collectLive(finding.sessionId, { durationMs, limit });
+            if (Array.isArray(events) && events.length > 0) {
+              const prev = finding.backendContext || {};
+              const existing = Array.isArray(prev.liveEvents) ? prev.liveEvents : [];
+              finding.attachBackendContext({ ...prev, liveEvents: existing.concat(events) });
+              autoEnrichTotal.inc({ outcome: 'collected' });
+            } else {
+              autoEnrichTotal.inc({ outcome: 'skipped' });
+            }
+          } catch (err) {
+            autoEnrichTotal.inc({ outcome: 'failed' });
+            console.warn(`[Sentinel] Auto-enrich failed for finding ${findingId}:`, err.message);
+          }
+        } else {
+          autoEnrichTotal.inc({ outcome: 'disabled' });
+        }
+      }
+
+      // Step 1: Enrich with backend traces
     if (this.trace?.isConfigured()) {
       try {
         const traces = await this.trace.getTraces(finding.sessionId, {
           since: finding.createdAt,
         });
-        finding.attachBackendContext({ traces });
+        // Merge to preserve any liveEvents attached by auto-enrich (Step 0).
+        const prevCtx = finding.backendContext || {};
+        finding.attachBackendContext({ ...prevCtx, traces });
       } catch (err) {
         console.warn(`[Sentinel] Trace enrichment failed for finding ${findingId}:`, err.message);
       }
@@ -105,6 +147,16 @@ export class DiagnosisService {
     }
 
     return finding;
+    } catch (err) {
+      outcome = err instanceof IntegrationError && /not configured/i.test(err.message)
+        ? 'ai_unavailable'
+        : 'failed';
+      throw err;
+    } finally {
+      const durationSec = Number(process.hrtime.bigint() - startNs) / 1e9;
+      diagnosesTotal.inc({ outcome });
+      diagnosisDuration.observe({ outcome }, durationSec);
+    }
   }
 
   /**
@@ -118,9 +170,13 @@ export class DiagnosisService {
    */
   async enrichWithLiveTraces(findingId, options = {}) {
     const finding = await this.storage.getFinding(findingId);
-    if (!finding) throw new NotFoundError(`Finding ${findingId} not found`);
+    if (!finding) {
+      enrichLiveTotal.inc({ outcome: 'not_found' });
+      throw new NotFoundError(`Finding ${findingId} not found`);
+    }
 
     if (!this.trace || typeof this.trace.collectLive !== 'function' || !this.trace.isConfigured?.()) {
+      enrichLiveTotal.inc({ outcome: 'skipped_unconfigured' });
       return { findingId, added: 0, total: 0, skipped: 'trace-adapter-not-configured' };
     }
 
@@ -128,6 +184,7 @@ export class DiagnosisService {
     try {
       events = await this.trace.collectLive(finding.sessionId, options);
     } catch (err) {
+      enrichLiveTotal.inc({ outcome: 'skipped_failed' });
       console.warn(`[Sentinel] Live trace collection failed for ${findingId}:`, err.message);
       return { findingId, added: 0, total: 0, skipped: 'collect-failed' };
     }
@@ -138,6 +195,9 @@ export class DiagnosisService {
 
     finding.attachBackendContext({ ...prev, liveEvents: merged });
     await this.storage.updateFinding(finding);
+
+    enrichLiveTotal.inc({ outcome: 'collected' });
+    enrichLiveEventsCollected.observe(events.length);
 
     return { findingId, added: events.length, total: merged.length };
   }
