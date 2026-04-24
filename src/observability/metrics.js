@@ -84,6 +84,14 @@ export const autoEnrichTotal = new Counter({
   registers: [registry],
 });
 
+// ── Auto-processing (fire-and-forget diagnose + correction after POST /findings) ──
+export const autoProcessTotal = new Counter({
+  name: 'sentinel_auto_process_total',
+  help: 'Total auto-process (diagnose+correct) attempts after finding creation',
+  labelNames: ['stage', 'outcome'], // stage: diagnose|correct ; outcome: success|failed|retried
+  registers: [registry],
+});
+
 /**
  * Reset all metrics. Used by tests to keep runs isolated.
  */

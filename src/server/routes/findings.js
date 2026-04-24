@@ -3,22 +3,75 @@
 // ─────────────────────────────────────────────
 
 import { Router } from 'express';
-import { randomUUID as _randomUUID } from 'node:crypto';
 import { asyncHandler } from '../middleware/error-handler.js';
-import { ValidationError } from '../../core/errors.js';
+import { ValidationError, NotFoundError } from '../../core/errors.js';
+import { autoProcessTotal } from '../../observability/metrics.js';
+
+// Retry once on transient failure with small backoff
+async function runWithRetry(fn, stage, findingId) {
+  try {
+    await fn();
+    autoProcessTotal.inc({ stage, outcome: 'success' });
+    return true;
+  } catch (err1) {
+    autoProcessTotal.inc({ stage, outcome: 'retried' });
+    console.warn(
+      `[Sentinel] auto_process ${stage} attempt=1 finding=${findingId} err=${err1.message}`,
+    );
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      await fn();
+      autoProcessTotal.inc({ stage, outcome: 'success' });
+      return true;
+    } catch (err2) {
+      autoProcessTotal.inc({ stage, outcome: 'failed' });
+      console.warn(
+        `[Sentinel] auto_process ${stage} attempt=2 finding=${findingId} err=${err2.message}`,
+      );
+      return false;
+    }
+  }
+}
 
 async function autoProcessFinding(services, findingId) {
   if (process.env.SENTINEL_AUTO_DIAGNOSE !== 'true') return;
 
-  try {
-    await services.diagnosis.diagnose(findingId);
+  const diagnosed = await runWithRetry(
+    () => services.diagnosis.diagnose(findingId),
+    'diagnose',
+    findingId,
+  );
+  if (!diagnosed) return;
 
-    if (process.env.SENTINEL_AUTO_CORRECT === 'true') {
-      await services.correction.generateCorrection(findingId);
-    }
-  } catch (err) {
-    console.warn(`[Sentinel] Auto-processing failed for finding ${findingId}:`, err.message);
+  if (process.env.SENTINEL_AUTO_CORRECT === 'true') {
+    await runWithRetry(
+      () => services.correction.generateCorrection(findingId),
+      'correct',
+      findingId,
+    );
   }
+}
+
+// §9.8 — Decide whether a freshly created finding should be auto-processed.
+// - auto_* sources: always eligible.
+// - manual: eligible when the client explicitly opts in (`autoTriggerPipeline: true`)
+//   or the finding carries enough context to make diagnosis meaningful
+//   (screenshot + annotation text + correlationId).
+function isAutoProcessEligible(finding, body) {
+  if (body?.autoTriggerPipeline === true) return true;
+
+  const src = finding.source;
+  if (src === 'auto_error' || src === 'auto_performance' || src === 'auto_network') {
+    return true;
+  }
+  if (src === 'manual') {
+    const hasScreenshot = !!finding.screenshotUrl;
+    const annotationText = finding.annotation?.text || finding.annotation?.description;
+    const hasAnnotationText = typeof annotationText === 'string' && annotationText.trim().length > 0;
+    const hasCorrelation = !!finding.correlationId;
+    return hasScreenshot && hasAnnotationText && hasCorrelation;
+  }
+  return false;
 }
 
 export function createFindingRoutes(services) {
@@ -56,7 +109,9 @@ export function createFindingRoutes(services) {
     });
 
     queueMicrotask(() => {
-      void autoProcessFinding(services, finding.id);
+      if (isAutoProcessEligible(finding, req.body)) {
+        void autoProcessFinding(services, finding.id);
+      }
     });
 
     res.status(201).json({ success: true, data: finding.toJSON() });
@@ -155,11 +210,9 @@ export function createFindingRoutes(services) {
 
   // POST /api/findings/:id/media — Upload audio/video blob for a finding
   router.post('/:id/media', asyncHandler(async (req, res) => {
-    const finding = await services.findings.get(req.params.id);
-
     const { type, mimeType, data } = req.body;
     if (!type || !['audio', 'video'].includes(type)) throw new ValidationError('type must be "audio" or "video"');
-    if (!data) throw new ValidationError('data (base64-encoded blob) is required');
+    if (!data || typeof data !== 'string') throw new ValidationError('data (base64-encoded blob) is required');
 
     // Validate size: 10MB audio, 50MB video
     const maxBytes = type === 'audio' ? 10 * 1024 * 1024 : 50 * 1024 * 1024;
@@ -168,20 +221,23 @@ export function createFindingRoutes(services) {
       throw new ValidationError(`${type} exceeds max size of ${maxBytes / (1024 * 1024)}MB`);
     }
 
-    const mediaId = _randomUUID();
-    finding.addMedia({
-      id: mediaId,
-      type,
-      mimeType: mimeType || (type === 'audio' ? 'audio/webm' : 'video/webm'),
-      size: sizeEstimate,
-      url: `/api/findings/${finding.id}/media/${mediaId}`,
-    });
-    await services.findings.storage.updateFinding(finding);
+    const buffer = Buffer.from(data, 'base64');
+    if (buffer.length > maxBytes) {
+      throw new ValidationError(`${type} exceeds max size of ${maxBytes / (1024 * 1024)}MB`);
+    }
 
-    res.status(201).json({
-      success: true,
-      data: { mediaId, type, size: sizeEstimate, url: `/api/findings/${finding.id}/media/${mediaId}` },
-    });
+    const result = await services.findings.storeMedia(req.params.id, { type, mimeType, buffer });
+    res.status(201).json({ success: true, data: result });
+  }));
+
+  // GET /api/findings/:id/media/:mediaId — Stream the stored audio/video bytes
+  router.get('/:id/media/:mediaId', asyncHandler(async (req, res) => {
+    const media = await services.findings.getMedia(req.params.id, req.params.mediaId);
+    if (!media) throw new NotFoundError('Media not found');
+    res.setHeader('Content-Type', media.contentType || 'application/octet-stream');
+    res.setHeader('Content-Length', String(media.buffer.length));
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.status(200).end(media.buffer);
   }));
 
   return router;

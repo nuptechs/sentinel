@@ -321,6 +321,94 @@ describe('Finding Routes — push, suggest-title, media', () => {
       assert.equal(res.status, 200);
     });
   });
+
+  // ── GET /api/findings/:id/media/:mediaId (§9.6) ─
+
+  describe('GET /api/findings/:id/media/:mediaId', () => {
+    // Binary-safe request helper
+    function makeRawRequest(method, path) {
+      const addr = server.address();
+      return new Promise((resolve, reject) => {
+        const r = http.request(`http://127.0.0.1:${addr.port}${path}`, { method }, (res) => {
+          const chunks = [];
+          res.on('data', (c) => chunks.push(c));
+          res.on('end', () => {
+            resolve({
+              status: res.statusCode,
+              headers: res.headers,
+              buffer: Buffer.concat(chunks),
+            });
+          });
+        });
+        r.on('error', reject);
+        r.end();
+      });
+    }
+
+    it('returns the exact bytes that were uploaded', async () => {
+      const id = await createFinding();
+      const bytes = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81]); // EBML-ish header
+      const upload = await makeRequest(server, 'POST', `/api/findings/${id}/media`, {
+        type: 'audio', mimeType: 'audio/webm', data: bytes.toString('base64'),
+      });
+      assert.equal(upload.status, 201);
+      const mediaId = upload.body.data.mediaId;
+      const url = upload.body.data.url;
+      assert.equal(url, `/api/findings/${id}/media/${mediaId}`);
+
+      const res = await makeRawRequest('GET', url);
+      assert.equal(res.status, 200);
+      assert.equal(res.headers['content-type'], 'audio/webm');
+      assert.equal(res.headers['content-length'], String(bytes.length));
+      assert.deepEqual(res.buffer, bytes);
+    });
+
+    it('returns 404 for unknown mediaId', async () => {
+      const id = await createFinding();
+      const res = await makeRawRequest('GET', `/api/findings/${id}/media/does-not-exist`);
+      assert.equal(res.status, 404);
+    });
+
+    it('returns 404 for unknown finding', async () => {
+      const res = await makeRawRequest('GET', `/api/findings/no-such-finding/media/anything`);
+      assert.equal(res.status, 404);
+    });
+
+    it('refuses to serve media owned by a different finding', async () => {
+      const a = await createFinding();
+      const b = await createFinding();
+      const upload = await makeRequest(server, 'POST', `/api/findings/${a}/media`, {
+        type: 'audio', data: Buffer.from('hello').toString('base64'),
+      });
+      const mediaId = upload.body.data.mediaId;
+      const res = await makeRawRequest('GET', `/api/findings/${b}/media/${mediaId}`);
+      assert.equal(res.status, 404);
+    });
+  });
+
+  // ── Auto-process eligibility (§9.8) ─────
+
+  describe('autoProcessFinding eligibility', () => {
+    it('does not invoke pipeline for manual finding without rich context', async () => {
+      // AUTO_DIAGNOSE env is not set, but we still verify status stays "open"
+      const id = await createFinding({
+        source: 'manual',
+        // no screenshotUrl, no correlationId
+      });
+      await new Promise((r) => setImmediate(r));
+      const res = await makeRequest(server, 'GET', `/api/findings/${id}`);
+      assert.equal(res.body.data.status, 'open');
+    });
+
+    it('accepts autoTriggerPipeline opt-in without rich context', async () => {
+      // We can only verify it doesn't crash and finding exists; env-gated pipeline stays dormant.
+      const res = await makeRequest(server, 'POST', '/api/findings', {
+        sessionId: 's1', projectId: 'p1', title: 'Flag opt-in', type: 'bug', source: 'manual',
+        autoTriggerPipeline: true,
+      });
+      assert.equal(res.status, 201);
+    });
+  });
 });
 
 // ── Suite without integration service ───────

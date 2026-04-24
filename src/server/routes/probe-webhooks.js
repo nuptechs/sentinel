@@ -28,7 +28,11 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 const MAX_BUFFER = 100;
 const MAX_SKEW_SECONDS = 300; // 5 minutes
 const MAX_BODY_BYTES = 1_048_576; // 1MB
-const DEFAULT_PROBE_PROJECT_ID = process.env.SENTINEL_PROBE_PROJECT_ID || 'debug-probe';
+// NOTE: no silent fallback here — if SENTINEL_PROBE_PROJECT_ID is unset we
+// must not quietly mirror sessions into a shared hardcoded project id
+// (would leak across tenants / hide misconfiguration). Resolved at call time
+// so tests and runtime env changes are honored. See mirrorSession.
+let missingProjectIdWarned = false;
 
 function sign(secret, timestamp, rawBody) {
   const hmac = createHmac('sha256', secret);
@@ -68,15 +72,35 @@ export function createProbeWebhookRoutes({ storage = null, services = null, logg
     const sessionId = payload?.data?.sessionId;
     if (!sessionId) return;
 
+    const projectId = process.env.SENTINEL_PROBE_PROJECT_ID;
+    if (!projectId) {
+      // Refuse to mirror without an explicit project id. Log once so the
+      // misconfiguration is visible but don't crash the webhook pipeline.
+      if (!missingProjectIdWarned) {
+        missingProjectIdWarned = true;
+        if (typeof logger.error === 'function') {
+          logger.error(
+            '[Probe Webhook] SENTINEL_PROBE_PROJECT_ID is not set — session mirroring DISABLED. ' +
+            'Set SENTINEL_PROBE_PROJECT_ID to the Sentinel project id that should own Debug Probe sessions.',
+          );
+        } else {
+          console.error(
+            '[Probe Webhook] SENTINEL_PROBE_PROJECT_ID is not set — session mirroring DISABLED.',
+          );
+        }
+      }
+      return;
+    }
+
     try {
       if (event === 'session.created') {
         await services.sessions.getOrCreate(sessionId, {
-          projectId: DEFAULT_PROBE_PROJECT_ID,
+          projectId,
           source: 'debug-probe',
         });
       } else if (event === 'session.completed') {
         await services.sessions.getOrCreate(sessionId, {
-          projectId: DEFAULT_PROBE_PROJECT_ID,
+          projectId,
           source: 'debug-probe',
         });
         if (typeof services.sessions.complete === 'function') {

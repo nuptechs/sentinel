@@ -17,6 +17,9 @@ export class PostgresStorageAdapter extends StoragePort {
   constructor({ pool }) {
     super();
     this.pool = pool;
+    // TODO: persist media blobs in a bytea column. For now, bytes live in
+    // process memory; the `sentinel_findings.media` JSON metadata persists.
+    this._media = new Map();
   }
 
   // ── Sessions ──────────────────────────────
@@ -229,6 +232,23 @@ export class PostgresStorageAdapter extends StoragePort {
       params
     );
     return rows.map(r => this._mapFinding(r));
+  }
+
+  // ── Finding media blobs (ephemeral) ───────
+  // TODO: persist to bytea / object storage. For now bytes live in process
+  // memory, so they are lost on restart. Metadata still lives in sentinel_findings.
+
+  async storeMedia({ id, findingId, contentType, buffer }) {
+    if (!id) throw new Error('storeMedia: id is required');
+    if (!Buffer.isBuffer(buffer)) throw new Error('storeMedia: buffer must be a Buffer');
+    this._media.set(id, { id, findingId, contentType, buffer: Buffer.from(buffer) });
+    return { id, findingId, contentType, size: buffer.length };
+  }
+
+  async getMedia(mediaId) {
+    const row = this._media.get(mediaId);
+    if (!row) return null;
+    return { id: row.id, findingId: row.findingId, contentType: row.contentType, buffer: Buffer.from(row.buffer) };
   }
 
   // ── Traces ────────────────────────────────

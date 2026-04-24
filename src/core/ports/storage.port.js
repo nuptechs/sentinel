@@ -59,6 +59,18 @@ export class StoragePort {
     throw new Error('StoragePort.listFindingsByProject() not implemented');
   }
 
+  // ── Finding media blobs (audio/video bytes) ──
+  // Kept separate from Finding JSON so binaries are not streamed on every read.
+  // Default adapters store bytes in-memory (ephemeral); durable storage is a TODO.
+
+  async storeMedia(row) {
+    throw new Error('StoragePort.storeMedia() not implemented');
+  }
+
+  async getMedia(mediaId) {
+    throw new Error('StoragePort.getMedia() not implemented');
+  }
+
   // ── Traces ─────────────────────────────────
 
   async storeTrace(trace) {

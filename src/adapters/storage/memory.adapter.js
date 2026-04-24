@@ -18,6 +18,7 @@ export class MemoryStorageAdapter extends StoragePort {
     this.traceSessionIndex = new Map(); // Map<sessionId, Set<correlationId>>
     this.webhookEvents = new Map();
     this.probeWebhooks = new Map(); // Map<deliveryId, row>
+    this.media = new Map(); // Map<mediaId, { id, findingId, contentType, buffer }>
   }
 
   async createSession(session) {
@@ -96,6 +97,21 @@ export class MemoryStorageAdapter extends StoragePort {
     return results.slice(offset, offset + limit).map(r => new Finding(r));
   }
 
+  // ── Finding media blobs ───────────────────
+
+  async storeMedia({ id, findingId, contentType, buffer }) {
+    if (!id) throw new Error('storeMedia: id is required');
+    if (!Buffer.isBuffer(buffer)) throw new Error('storeMedia: buffer must be a Buffer');
+    this.media.set(id, { id, findingId, contentType, buffer: Buffer.from(buffer) });
+    return { id, findingId, contentType, size: buffer.length };
+  }
+
+  async getMedia(mediaId) {
+    const row = this.media.get(mediaId);
+    if (!row) return null;
+    return { id: row.id, findingId: row.findingId, contentType: row.contentType, buffer: Buffer.from(row.buffer) };
+  }
+
   // ── Traces ────────────────────────────────
 
   async storeTrace(trace) {
@@ -164,6 +180,7 @@ export class MemoryStorageAdapter extends StoragePort {
     this.traces.clear();
     this.traceSessionIndex.clear();
     this.webhookEvents.clear();
+    this.media.clear();
   }
 
   // ── Webhook events ────────────────────────

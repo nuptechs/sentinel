@@ -92,4 +92,39 @@ export class FindingService {
     await this.storage.updateFinding(finding);
     return finding;
   }
+
+  // ── Media blobs ─────────────────────────
+
+  async storeMedia(findingId, { type, mimeType, buffer }) {
+    const finding = await this.get(findingId);
+    if (!Buffer.isBuffer(buffer)) throw new ValidationError('buffer must be a Buffer');
+    if (!type || !['audio', 'video'].includes(type)) {
+      throw new ValidationError('type must be "audio" or "video"');
+    }
+    const contentType = mimeType || (type === 'audio' ? 'audio/webm' : 'video/webm');
+    const { randomUUID } = await import('node:crypto');
+    const mediaId = randomUUID();
+
+    await this.storage.storeMedia({ id: mediaId, findingId: finding.id, contentType, buffer });
+
+    finding.addMedia({
+      id: mediaId,
+      type,
+      mimeType: contentType,
+      size: buffer.length,
+      url: `/api/findings/${finding.id}/media/${mediaId}`,
+    });
+    await this.storage.updateFinding(finding);
+
+    return { mediaId, type, size: buffer.length, mimeType: contentType, url: `/api/findings/${finding.id}/media/${mediaId}` };
+  }
+
+  async getMedia(findingId, mediaId) {
+    // Ensure finding exists (authorization scope — media id alone would be ambiguous)
+    const finding = await this.get(findingId);
+    const row = await this.storage.getMedia(mediaId);
+    if (!row) return null;
+    if (row.findingId && row.findingId !== finding.id) return null;
+    return row;
+  }
 }

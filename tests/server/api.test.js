@@ -353,6 +353,8 @@ describe('HTTP API', () => {
           title: 'Auto process me',
           type: 'bug',
           source: 'manual',
+          // §9.8 — manual findings must opt-in explicitly for the auto pipeline.
+          autoTriggerPipeline: true,
         });
 
         assert.equal(created.status, 201);

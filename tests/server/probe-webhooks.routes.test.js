@@ -58,12 +58,15 @@ function get(server, path) {
 describe('Probe Webhook Receiver', () => {
   let server;
   let originalSecret;
+  let originalProjectId;
   let storage;
   let sessionCalls;
 
   before(async () => {
     originalSecret = process.env.PROBE_WEBHOOK_SECRET;
     process.env.PROBE_WEBHOOK_SECRET = SECRET;
+    originalProjectId = process.env.SENTINEL_PROBE_PROJECT_ID;
+    process.env.SENTINEL_PROBE_PROJECT_ID = 'debug-probe';
 
     storage = new MemoryStorageAdapter();
     sessionCalls = { getOrCreate: [], complete: [] };
@@ -89,6 +92,8 @@ describe('Probe Webhook Receiver', () => {
   after(async () => {
     if (originalSecret === undefined) delete process.env.PROBE_WEBHOOK_SECRET;
     else process.env.PROBE_WEBHOOK_SECRET = originalSecret;
+    if (originalProjectId === undefined) delete process.env.SENTINEL_PROBE_PROJECT_ID;
+    else process.env.SENTINEL_PROBE_PROJECT_ID = originalProjectId;
     await new Promise((r) => server.close(r));
   });
 
